@@ -1,0 +1,411 @@
+mqtt:
+  enabled: true
+  host: 172.20.0.2
+  port: 1883
+  topic_prefix: frigate
+  client_id: frigate
+
+auth:
+  enabled: true
+
+semantic_search:
+  enabled: true
+  reindex: false
+  model_size: large
+
+face_recognition:
+  enabled: true
+  min_area: 1500
+  detection_threshold: 0.7
+  recognition_threshold: 0.85
+  model_size: large
+  save_attempts: 100
+
+detectors:
+  onnx:
+    type: onnx
+
+model:
+  path: /config/model_cache/onnx/yolov8m.onnx
+  width: 640
+  height: 640
+  input_tensor: nchw
+  input_pixel_format: rgb
+  input_dtype: float
+  model_type: yolo-generic
+
+database:
+  path: /media/frigate/frigate.db
+
+record:
+  enabled: true
+  retain:
+    days: 0
+    mode: all
+  alerts:
+    retain:
+      days: 30
+  detections:
+    retain:
+      days: 30
+  export:
+    timelapse_args: -vf setpts=0.04*PTS -r 30
+
+snapshots:
+  enabled: true
+  bounding_box: true
+  crop: false
+  retain:
+    default: 30
+
+motion:
+  threshold: 20
+  contour_area: 15
+  improve_contrast: true
+  frame_alpha: 0.04
+
+detect:
+  enabled: true
+  width: 1920
+  height: 1080
+  fps: 5
+  max_disappeared: 150
+  stationary:
+    interval: 15
+    threshold: 30
+    max_frames:
+      default: 3000
+      objects:
+        person: 0
+
+objects:
+  track:
+    - person
+    - car
+    - dog
+    - cat
+    - motorcycle
+    - bicycle
+  filters:
+    person:
+      min_area: 2500
+      min_score: 0.5
+      threshold: 0.7
+
+ffmpeg:
+  hwaccel_args: preset-nvidia-h265
+  retry_interval: 10
+
+go2rtc:
+  streams:
+    cam_009:
+      - rtsp://admin:jmj55555@192.168.1.XXX:554/Streaming/Channels/101
+      - ffmpeg:cam_009#video=copy#audio=copy#audio=opus
+    cam_009_sub:
+      - rtsp://admin:jmj55555@192.168.1.XXX:554/Streaming/Channels/102
+    cam_026:
+      - rtsp://admin:jmj55555@192.168.1.XXX:554/Streaming/Channels/101
+      - ffmpeg:cam_026#video=copy#audio=copy#audio=opus
+    cam_026_sub:
+      - rtsp://admin:jmj55555@192.168.1.XXX:554/Streaming/Channels/102
+    cam_028:
+      - rtsp://admin:jmj55555@192.168.1.XXX:554/Streaming/Channels/101
+      - ffmpeg:cam_028#video=copy#audio=copy#audio=opus
+    cam_028_sub:
+      - rtsp://admin:jmj55555@192.168.1.XXX:554/Streaming/Channels/102
+    cam_040:
+      - rtsp://admin:jmj55555@192.168.1.XXX:554/Streaming/Channels/101
+      - ffmpeg:cam_040#video=copy#audio=copy#audio=opus
+    cam_040_sub:
+      - rtsp://admin:jmj55555@192.168.1.XXX:554/Streaming/Channels/102
+    cam_054:
+      - rtsp://admin:jmj55555@192.168.1.XXX:554/Streaming/Channels/101
+      - ffmpeg:cam_054#video=copy#audio=copy#audio=opus
+    cam_054_sub:
+      - rtsp://admin:jmj55555@192.168.1.XXX:554/Streaming/Channels/102
+    cam_060:
+      - rtsp://admin:jmj55555@192.168.1.XXX:554/Streaming/Channels/101
+      - ffmpeg:cam_060#video=copy#audio=copy#audio=opus
+    cam_060_sub:
+      - rtsp://admin:jmj55555@192.168.1.XXX:554/Streaming/Channels/102
+    cam_068:
+      - rtsp://admin:jmj55555@192.168.1.XXX:554/Streaming/Channels/101
+      - ffmpeg:cam_068#video=copy#audio=copy#audio=opus
+    cam_068_sub:
+      - rtsp://admin:jmj55555@192.168.1.XXX:554/Streaming/Channels/102
+    cam_089:
+      - rtsp://admin:jmj55555@192.168.1.XXX:554/Streaming/Channels/101
+      - ffmpeg:cam_089#video=copy#audio=copy#audio=opus
+    cam_089_sub:
+      - rtsp://admin:jmj55555@192.168.1.XXX:554/Streaming/Channels/102
+    cam_108:
+      - rtsp://admin:jmj55555@192.168.1.XXX:554/Streaming/Channels/101
+      - ffmpeg:cam_108#video=copy#audio=copy#audio=opus
+    cam_108_sub:
+      - rtsp://admin:jmj55555@192.168.1.XXX:554/Streaming/Channels/102
+    cam_179:
+      - rtsp://admin:jmj55555@192.168.1.XXX:554/Streaming/Channels/101
+      - ffmpeg:cam_179#video=copy#audio=copy#audio=opus
+    cam_179_sub:
+      - rtsp://admin:jmj55555@192.168.1.XXX:554/Streaming/Channels/102
+    cam_192:
+      - rtsp://admin:jmj55555@192.168.1.XXX:554/Streaming/Channels/101
+      - ffmpeg:cam_192#video=copy#audio=copy#audio=opus
+    cam_192_sub:
+      - rtsp://admin:jmj55555@192.168.1.XXX:554/Streaming/Channels/102
+    # CamHi cameras - use single stream (640x480) with TCP transport
+    # These cameras have limited concurrent connections, so we use one stream for both record and detect
+    cam_237:
+      - rtsp://admin:CHANGE_ME@192.168.1.XXX:554/cam/realmonitor?channel=1&subtype=0#tcp
+      - ffmpeg:cam_237#video=copy#audio=copy#audio=opus
+    cam_237_sub:
+      - rtsp://admin:CHANGE_ME@192.168.1.XXX:554/cam/realmonitor?channel=1&subtype=0#tcp
+    cam_238:
+      - rtsp://admin:CHANGE_ME@192.168.1.XXX:554/cam/realmonitor?channel=1&subtype=0#tcp
+      - ffmpeg:cam_238#video=copy#audio=copy#audio=opus
+    cam_238_sub:
+      - rtsp://admin:CHANGE_ME@192.168.1.XXX:554/cam/realmonitor?channel=1&subtype=0#tcp
+    cam_239:
+      - rtsp://admin:CHANGE_ME@192.168.1.XXX:554/cam/realmonitor?channel=1&subtype=0#tcp
+      - ffmpeg:cam_239#video=copy#audio=copy#audio=opus
+    cam_239_sub:
+      - rtsp://admin:CHANGE_ME@192.168.1.XXX:554/cam/realmonitor?channel=1&subtype=0#tcp
+
+cameras:
+  cam_009:
+    ffmpeg:
+      inputs:
+        - path: rtsp://127.0.0.1:8554/cam_009
+          roles:
+            - record
+        - path: rtsp://127.0.0.1:8554/cam_009_sub
+          roles:
+            - detect
+      output_args:
+        record: preset-record-generic-audio-copy
+    objects:
+      filters:
+        person:
+          min_area: 2000
+    zones:
+      doorway_zone:
+        coordinates: 0.39,0.297,0.99,0.297,0.99,0.997,0.39,0.997
+        objects: person
+        inertia: 3
+        loitering_time: 0
+  cam_026:
+    ffmpeg:
+      inputs:
+        - path: rtsp://127.0.0.1:8554/cam_026
+          roles:
+            - record
+        - path: rtsp://127.0.0.1:8554/cam_026_sub
+          roles:
+            - detect
+      output_args:
+        record: preset-record-generic-audio-copy
+
+  cam_028:
+    ffmpeg:
+      inputs:
+        - path: rtsp://127.0.0.1:8554/cam_028
+          roles:
+            - record
+        - path: rtsp://127.0.0.1:8554/cam_028_sub
+          roles:
+            - detect
+      output_args:
+        record: preset-record-generic-audio-copy
+    motion:
+      threshold: 15
+      contour_area: 10
+    objects:
+      filters:
+        person:
+          min_area: 1500
+
+  cam_040:
+    ffmpeg:
+      inputs:
+        - path: rtsp://127.0.0.1:8554/cam_040
+          roles:
+            - record
+        - path: rtsp://127.0.0.1:8554/cam_040_sub
+          roles:
+            - detect
+      output_args:
+        record: preset-record-generic-audio-copy
+    objects:
+      filters:
+        person:
+          min_area: 3000
+    zones:
+      service_zone:
+        coordinates: 0,0,0.5,0,0.349,1,0,1
+        objects: person
+        inertia: 3
+        loitering_time: 0
+      cashier_zone:
+        coordinates: 0.577,0.275,0.939,0.365,0.922,1,0.622,1
+        objects: person
+        inertia: 3
+        loitering_time: 0
+      kitchen_entry_zone:
+        coordinates: 0.947,0.406,1,0.6,1,1,0.928,1
+        objects: person
+        inertia: 3
+
+        loitering_time: 0
+  cam_054:
+    ffmpeg:
+      inputs:
+        - path: rtsp://127.0.0.1:8554/cam_054
+          roles:
+            - record
+        - path: rtsp://127.0.0.1:8554/cam_054_sub
+          roles:
+            - detect
+      output_args:
+        record: preset-record-generic-audio-copy
+    zones:
+      washroom_zone:
+        coordinates: 0.1,0.2,0.9,0.2,0.9,0.9,0.1,0.9
+        objects:
+          - person
+
+  cam_060:
+    ffmpeg:
+      inputs:
+        - path: rtsp://127.0.0.1:8554/cam_060
+          roles:
+            - record
+        - path: rtsp://127.0.0.1:8554/cam_060_sub
+          roles:
+            - detect
+      output_args:
+        record: preset-record-generic-audio-copy
+
+  cam_068:
+    ffmpeg:
+      inputs:
+        - path: rtsp://127.0.0.1:8554/cam_068
+          roles:
+            - record
+        - path: rtsp://127.0.0.1:8554/cam_068_sub
+          roles:
+            - detect
+      output_args:
+        record: preset-record-generic-audio-copy
+
+  cam_089:
+    ffmpeg:
+      inputs:
+        - path: rtsp://127.0.0.1:8554/cam_089
+          roles:
+            - record
+        - path: rtsp://127.0.0.1:8554/cam_089_sub
+          roles:
+            - detect
+      output_args:
+        record: preset-record-generic-audio-copy
+
+  cam_108:
+    ffmpeg:
+      inputs:
+        - path: rtsp://127.0.0.1:8554/cam_108
+          roles:
+            - record
+        - path: rtsp://127.0.0.1:8554/cam_108_sub
+          roles:
+            - detect
+      output_args:
+        record: preset-record-generic-audio-copy
+    objects:
+      filters:
+        person:
+          min_area: 3000
+
+  cam_179:
+    ffmpeg:
+      inputs:
+        - path: rtsp://127.0.0.1:8554/cam_179
+          roles:
+            - record
+        - path: rtsp://127.0.0.1:8554/cam_179_sub
+          roles:
+            - detect
+      output_args:
+        record: preset-record-generic-audio-copy
+    motion:
+      threshold: 15
+      contour_area: 10
+    objects:
+      filters:
+        person:
+          min_area: 1500
+
+  cam_192:
+    ffmpeg:
+      inputs:
+        - path: rtsp://127.0.0.1:8554/cam_192
+          roles:
+            - record
+        - path: rtsp://127.0.0.1:8554/cam_192_sub
+          roles:
+            - detect
+      output_args:
+        record: preset-record-generic-audio-copy
+    motion:
+      threshold: 15
+      contour_area: 10
+    objects:
+      filters:
+        person:
+          min_area: 1500
+    zones:
+      service_zone:
+        coordinates: 0,0,1,0,1,1,0,1
+        objects:
+          - person
+
+  cam_237:
+    ffmpeg:
+      inputs:
+        - path: rtsp://127.0.0.1:8554/cam_237
+          roles:
+            - record
+        - path: rtsp://127.0.0.1:8554/cam_237_sub
+          roles:
+            - detect
+      output_args:
+        record: preset-record-generic-audio-copy
+
+  cam_238:
+    ffmpeg:
+      inputs:
+        - path: rtsp://127.0.0.1:8554/cam_238
+          roles:
+            - record
+        - path: rtsp://127.0.0.1:8554/cam_238_sub
+          roles:
+            - detect
+      output_args:
+        record: preset-record-generic-audio-copy
+
+  cam_239:
+    ffmpeg:
+      inputs:
+        - path: rtsp://127.0.0.1:8554/cam_239
+          roles:
+            - record
+        - path: rtsp://127.0.0.1:8554/cam_239_sub
+          roles:
+            - detect
+      output_args:
+        record: preset-record-generic-audio-copy
+    objects:
+      filters:
+        person:
+          min_area: 3000
+
+version: 0.16-0

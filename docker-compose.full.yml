@@ -1,0 +1,135 @@
+version: "3.8"
+
+# Complete deployment stack for Analytics Dashboard
+# Includes: frontend, backend, frigate, mosquitto, influxdb
+
+services:
+  # React Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: analytics-frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  # FastAPI Backend with ReID
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: analytics-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - FRIGATE_URL=http://host.docker.internal:5000
+      - INFLUXDB_URL=http://host.docker.internal:8086
+      - INFLUXDB_TOKEN=${INFLUXDB_TOKEN:-frigate-analytics-token-2024}
+      - INFLUXDB_ORG=${INFLUXDB_ORG:-frigate}
+      - INFLUXDB_BUCKET=${INFLUXDB_BUCKET:-analytics}
+      - SQLITE_DATABASE_URL=sqlite:///./data/analytics.db
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-change-in-production}
+      - ACCESS_TOKEN_EXPIRE_MINUTES=480
+      - MQTT_HOST=host.docker.internal
+      - MQTT_PORT=1883
+      - REID_SIMILARITY_THRESHOLD=0.80
+      - REID_CROSS_CAMERA_THRESHOLD=0.75
+    volumes:
+      - backend-data:/app/data
+      - /mnt/hdd/frigate/clips/faces:/frigate/clips/faces
+      - ./frigate/config:/frigate/config
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 1G
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  # Frigate NVR with object detection
+  frigate:
+    image: ghcr.io/blakeblackshear/frigate:stable-tensorrt
+    container_name: frigate
+    privileged: true
+    shm_size: "256mb"
+    ports:
+      - "5000:5000"    # Web UI
+      - "8554:8554"    # RTSP
+      - "8555:8555"    # WebRTC (TCP)
+      - "8555:8555/udp" # WebRTC (UDP)
+    volumes:
+      - ./frigate/config:/config
+      - /mnt/hdd/frigate:/media/frigate
+      - type: tmpfs
+        target: /tmp/cache
+        tmpfs:
+          size: 1g
+    environment:
+      - FRIGATE_RTSP_PASSWORD=${RTSP_PASSWORD:-}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    depends_on:
+      - mosquitto
+    restart: unless-stopped
+
+  # MQTT Broker
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: mosquitto
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    volumes:
+      - ./mosquitto/config:/mosquitto/config
+      - mosquitto-data:/mosquitto/data
+      - mosquitto-log:/mosquitto/log
+    restart: unless-stopped
+
+  # Time-series database for analytics
+  influxdb:
+    image: influxdb:2.7
+    container_name: influxdb
+    ports:
+      - "8086:8086"
+    volumes:
+      - influxdb-data:/var/lib/influxdb2
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=${INFLUXDB_USER:-admin}
+      - DOCKER_INFLUXDB_INIT_PASSWORD=${INFLUXDB_PASSWORD:-adminpassword}
+      - DOCKER_INFLUXDB_INIT_ORG=${INFLUXDB_ORG:-frigate}
+      - DOCKER_INFLUXDB_INIT_BUCKET=${INFLUXDB_BUCKET:-analytics}
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=${INFLUXDB_TOKEN:-frigate-analytics-token-2024}
+    restart: unless-stopped
+
+volumes:
+  backend-data:
+  mosquitto-data:
+  mosquitto-log:
+  influxdb-data:
+
+networks:
+  default:
+    name: analytics-network
