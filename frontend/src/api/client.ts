@@ -387,6 +387,55 @@ export const getAnalyticsSummaryV2 = (date?: string) =>
 export const exportAnalyticsCsv = (date?: string) =>
   api.get('/analytics/export/csv', { params: { date }, responseType: 'blob' })
 
+// Queue Detection types
+export interface QueuePerson {
+  person_id: number
+  display_id: string
+  enter_time: string
+  wait_seconds: number
+  wait_formatted: string
+}
+
+export interface QueueStatus {
+  zone: string
+  queue_length: number
+  people: QueuePerson[]
+  avg_wait_seconds: number
+  avg_wait_formatted: string
+  max_wait_seconds: number
+  max_wait_formatted: string
+  updated_at: string
+}
+
+export interface QueueAlert {
+  zone: string
+  type: string
+  severity: 'warning' | 'critical'
+  message: string
+  value: number
+  threshold: number
+}
+
+export interface QueueHistoryPoint {
+  hour: string
+  queue_count: number
+  avg_wait_seconds: number
+  completed_visits: number
+}
+
+// Queue Detection endpoints
+export const getQueueStatus = (zone?: string) =>
+  api.get<QueueStatus>('/analytics/queue/status', { params: { zone } })
+
+export const getQueueAlerts = () =>
+  api.get<QueueAlert[]>('/analytics/queue/alerts')
+
+export const getQueueHistory = (zone?: string, hours?: number) =>
+  api.get<QueueHistoryPoint[]>('/analytics/queue/history', { params: { zone, hours } })
+
+export const getAllQueues = () =>
+  api.get<Record<string, QueueStatus>>('/analytics/queue/all')
+
 // Search types
 export interface SearchResult {
   id: string

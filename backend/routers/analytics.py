@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from services.influxdb_service import InfluxDBAnalyticsService
 from services.dwell_time_service import DwellTimeService
+from services.queue_service import QueueService, format_wait_time
 from database import get_db
 
 router = APIRouter(prefix="/api/analytics", tags=["analytics"])
@@ -513,3 +514,137 @@ async def get_dwell_summary(
     """Get comprehensive dwell time summary."""
     data = DwellTimeService.get_dwell_summary(db, date=date, days=days)
     return DwellSummary(**data)
+
+
+# ==================== Queue Detection Endpoints ====================
+
+class QueuePersonResponse(BaseModel):
+    person_id: int
+    display_id: str
+    enter_time: str
+    wait_seconds: int
+    wait_formatted: str
+
+
+class QueueStatusResponse(BaseModel):
+    zone: str
+    queue_length: int
+    people: list[QueuePersonResponse]
+    avg_wait_seconds: float
+    avg_wait_formatted: str
+    max_wait_seconds: int
+    max_wait_formatted: str
+    updated_at: str
+
+
+class QueueAlertResponse(BaseModel):
+    zone: str
+    type: str
+    severity: str
+    message: str
+    value: int
+    threshold: int
+
+
+class QueueHistoryPoint(BaseModel):
+    hour: str
+    queue_count: int
+    avg_wait_seconds: float
+    completed_visits: int
+
+
+@router.get("/queue/status", response_model=QueueStatusResponse)
+async def get_queue_status(
+    zone: str = Query("entrance", description="Queue zone to check"),
+    db: Session = Depends(get_db)
+):
+    """Get current queue status for a zone (entrance by default)."""
+    service = QueueService(db)
+    status = service.get_queue_status(zone)
+
+    if not status:
+        return QueueStatusResponse(
+            zone=zone,
+            queue_length=0,
+            people=[],
+            avg_wait_seconds=0,
+            avg_wait_formatted="0s",
+            max_wait_seconds=0,
+            max_wait_formatted="0s",
+            updated_at=datetime.utcnow().isoformat()
+        )
+
+    people = [
+        QueuePersonResponse(
+            person_id=p.person_id,
+            display_id=p.display_id,
+            enter_time=p.enter_time.isoformat(),
+            wait_seconds=p.wait_seconds,
+            wait_formatted=format_wait_time(p.wait_seconds)
+        )
+        for p in status.people
+    ]
+
+    return QueueStatusResponse(
+        zone=status.zone,
+        queue_length=status.queue_length,
+        people=people,
+        avg_wait_seconds=status.avg_wait_seconds,
+        avg_wait_formatted=format_wait_time(int(status.avg_wait_seconds)),
+        max_wait_seconds=status.max_wait_seconds,
+        max_wait_formatted=format_wait_time(status.max_wait_seconds),
+        updated_at=status.updated_at.isoformat()
+    )
+
+
+@router.get("/queue/alerts", response_model=list[QueueAlertResponse])
+async def get_queue_alerts(db: Session = Depends(get_db)):
+    """Get active queue alerts (long waits, high queue length)."""
+    service = QueueService(db)
+    alerts = service.get_queue_alerts()
+    return [QueueAlertResponse(**alert) for alert in alerts]
+
+
+@router.get("/queue/history", response_model=list[QueueHistoryPoint])
+async def get_queue_history(
+    zone: str = Query("entrance", description="Queue zone"),
+    hours: int = Query(24, ge=1, le=168, description="Hours of history"),
+    db: Session = Depends(get_db)
+):
+    """Get historical queue data for a zone."""
+    service = QueueService(db)
+    data = service.get_queue_history(zone, hours)
+    return [QueueHistoryPoint(**item) for item in data]
+
+
+@router.get("/queue/all")
+async def get_all_queues(db: Session = Depends(get_db)):
+    """Get status for all queue zones."""
+    service = QueueService(db)
+    queues = service.get_all_queues()
+
+    result = {}
+    for zone, status in queues.items():
+        people = [
+            {
+                "person_id": p.person_id,
+                "display_id": p.display_id,
+                "enter_time": p.enter_time.isoformat(),
+                "wait_seconds": p.wait_seconds,
+                "wait_formatted": format_wait_time(p.wait_seconds)
+            }
+            for p in status.people
+        ]
+
+        result[zone] = {
+            "zone": status.zone,
+            "queue_length": status.queue_length,
+            "people": people,
+            "avg_wait_seconds": status.avg_wait_seconds,
+            "avg_wait_formatted": format_wait_time(int(status.avg_wait_seconds)),
+            "max_wait_seconds": status.max_wait_seconds,
+            "max_wait_formatted": format_wait_time(status.max_wait_seconds),
+            "updated_at": status.updated_at.isoformat()
+        }
+
+    return result
