@@ -102,36 +102,44 @@ Restaurant analytics system with computer vision for people tracking across 14 c
 
 ## Camera Configuration
 
-### Cameras by Zone
+### Cameras by Zone (Frigate Camera Names)
 | Camera ID | Zone | Special Config |
 |-----------|------|----------------|
-| cam_009 | entrance | **Entry camera** - creates new person IDs |
-| cam_054 | hallway | Adjacent to entrance, seating |
-| cam_028 | seating_main | Main seating area |
-| cam_192 | seating_service | Service side seating |
-| cam_179 | service_area | Staff service area |
-| cam_040 | cashier | **Rotated 90°** (mounted sideways) |
-| cam_108 | kitchen | Kitchen view |
-| cam_239 | kitchen_prep | Kitchen prep area |
-| cam_068 | - | **Excluded** (top-down view) |
-| cam_060 | - | **Excluded** (top-down view) |
+| entrance | entrance | **Entry camera** - creates new person IDs |
+| bar_lounge | bar_lounge | **Entry camera** - creates new person IDs |
+| seating | seating | Main seating area |
+| cashier | cashier | **Rotated 90°** (mounted sideways) |
+| vip_room | vip_room | VIP room area |
+| karaoke | karaoke | Karaoke room |
+| bar | bar | Bar area |
+| food_pickup | food_pickup | Food pickup counter |
+| kitchen | kitchen | Kitchen view |
+| patio | patio | Outdoor patio |
+| hallway | hallway | Main hallway |
+| back_hallway | back_hallway | Back hallway |
+| storage | storage | Storage area |
+| office | office | Office |
 
 ### Camera Trust Levels
-- **HIGH_TRUST**: cam_009, cam_238, cam_192 - Good angle for embeddings
-- **MEDIUM_TRUST**: cam_108, cam_179, cam_028, cam_054, cam_040 - Match only
-- **ENTRY_CAMERAS**: cam_009 - Only camera that can create new person IDs
+- **ENTRY_CAMERAS**: `entrance`, `bar_lounge` - Can create new person IDs
+- **HIGH_TRUST**: `entrance`, `bar_lounge`, `seating`, `cashier`, `food_pickup` - Good angle for embeddings
+- **MEDIUM_TRUST**: `vip_room`, `karaoke`, `kitchen`, `patio` - Can match existing persons
+- **LOW_TRUST**: `bar` - Top-down view, lower quality ReID
+- **STAFF_ONLY**: `bar`, `food_pickup`, `kitchen` - Detections classified as staff if unmatched
 
 ## ReID System Configuration
 
 ### Environment Variables
 ```bash
-REID_SIMILARITY_THRESHOLD=0.80     # Same camera match threshold
-REID_CROSS_CAMERA_THRESHOLD=0.75   # Cross camera match threshold
+REID_SIMILARITY_THRESHOLD=0.90     # Same camera match threshold
+REID_CROSS_CAMERA_THRESHOLD=0.85   # Cross camera match threshold
 REID_MIN_MATCH_EMBEDDINGS=2        # Required embeddings to confirm
 REID_EMBEDDINGS_PER_PERSON=5       # Max stored per person
-REID_MIN_DETECTION_AREA=2000       # Min pixels for detection
+REID_MIN_DETECTION_AREA=5000       # Min pixels for detection
+REID_MIN_DETECTION_CONFIDENCE=0.60 # Min Frigate confidence (lowered from 0.75)
 REID_MIN_DETECTIONS_CONFIRM=3      # Frames before confirming new person
 REID_TEMPORAL_EXCLUSION=5          # Seconds - can't be in two places
+REID_EMBEDDING_QUALITY_GATE=0.85   # New embedding must match person's average
 ```
 
 ### Memory Limits (Leak Prevention)
@@ -237,6 +245,25 @@ print('Candidates:', sum(len(v) for v in _candidate_detections.values()))
 **Symptoms:** Console error "subLabel.split is not a function"
 **Root Cause:** subLabel could be null/undefined
 **Fix:** Added type guards in DetectionOverlay.tsx and LabelingModal.tsx
+
+### Camera ID Mismatch - No TrackedPerson Records (Fixed - Session 42)
+**Symptoms:** ReID worker running, MQTT connected, but 0 TrackedPerson/PersonSighting records
+**Root Cause:** reid_worker.py used internal camera IDs (`cam_009`) but Frigate sends actual names (`entrance`)
+**Fix:** Updated camera configuration in `backend/reid_worker.py`:
+- `ENTRY_CAMERAS = {"entrance", "bar_lounge"}` (was `{"cam_009"}`)
+- `HIGH_TRUST_CAMERAS` updated to use Frigate camera names
+- `CAMERA_ZONES` mapping updated
+- `MIN_DETECTION_CONFIDENCE` lowered from 0.75 to 0.60
+**Note:** Only ENTRY_CAMERAS can create new TrackedPerson records. Other cameras match against existing persons.
+
+### Dwell Time Tracking (Added - Session 42)
+**New Feature:** SQLite-based dwell time calculation from PersonSighting data
+**Endpoints:**
+- `/api/analytics/dwell/summary` - Summary stats
+- `/api/analytics/dwell/visit-stats` - Visit duration statistics
+- `/api/analytics/dwell/hourly-trend` - 24-hour trend data
+**Data Source:** PersonSighting.enter_time and exit_time
+**Note:** Data will populate as TrackedPerson records are created (requires entrance camera activity)
 
 ### CamHi Cameras (237/238/239) Green Screen
 **Symptoms:** Green screen, frame drops, "Error parsing AU headers" in Frigate logs
