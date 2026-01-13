@@ -5,6 +5,7 @@ import CameraCard from '../components/CameraCard'
 import CameraFeedModal from '../components/CameraFeedModal'
 import WebRTCGridCard from '../components/WebRTCGridCard'
 import JourneyPanel from '../components/JourneyPanel'
+import QueueStatusWidget from '../components/QueueStatusWidget'
 import { useStreamQuality, QUALITY_CONFIGS, type StreamQuality } from '../context/StreamQualityContext'
 import { useCamera } from '../context/CameraContext'
 import { useWebRTCConnectionManager } from '../context/WebRTCConnectionManager'
@@ -599,8 +600,9 @@ export default function Dashboard() {
   return (
     <div className="space-y-4 md:space-y-6">
       {/* Top row - stacks on mobile */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 md:gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 md:gap-6">
         <OccupancyCard />
+        <QueueStatusWidget zone="entrance" />
         <TodayStats />
         <RecentAlerts />
       </div>
