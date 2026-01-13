@@ -23,6 +23,7 @@ from database import SessionLocal, InfluxDBConnection, INFLUXDB_BUCKET, INFLUXDB
 from models import TrackedPerson, PersonEmbedding, PersonSighting, Staff
 from reid_service import get_reid_service
 from influxdb_client import Point
+from services.pose_service import get_pose_service, PoseState
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +70,10 @@ ADJACENCY_BOOST = float(os.getenv("REID_ADJACENCY_BOOST", "0.05"))  # Reduced si
 
 # Color histogram matching threshold (0-1, higher = stricter)
 COLOR_HISTOGRAM_THRESHOLD = float(os.getenv("REID_COLOR_THRESHOLD", "0.4"))  # Minimum color similarity
+
+# Pose estimation settings
+POSE_DETECTION_ENABLED = os.getenv("POSE_DETECTION_ENABLED", "true").lower() == "true"
+POSE_SAMPLE_RATE = int(os.getenv("POSE_SAMPLE_RATE", "5"))  # Run pose detection every N detections
 
 # Camera exclusions - top-down views (can still track but lower quality ReID)
 # Note: Even top-down cameras can do ReID on head/hair patterns, so we don't fully exclude
@@ -150,6 +155,7 @@ _person_color_histograms: Dict[int, np.ndarray] = {}  # person_id -> average col
 # Memory management state
 _detection_count = 0
 _last_cleanup_time = datetime.utcnow()
+_pose_sample_count = 0  # Counter for pose sampling
 
 
 def get_memory_mb():
@@ -170,6 +176,35 @@ def log_cache_sizes():
         f"colors:{len(_person_color_histograms)} embed_time:{len(_last_embedding_time)} "
         f"last_cam:{len(_person_last_camera)} exits:{len(_recent_exits)}"
     )
+
+
+def detect_pose_from_thumbnail(thumbnail_bytes: bytes) -> Optional[str]:
+    """
+    Detect pose from thumbnail bytes using MediaPipe.
+
+    Returns "seated", "standing", or None if detection failed/disabled.
+    """
+    global _pose_sample_count
+
+    if not POSE_DETECTION_ENABLED:
+        return None
+
+    # Sample-based pose detection to reduce overhead
+    _pose_sample_count += 1
+    if _pose_sample_count % POSE_SAMPLE_RATE != 0:
+        return None
+
+    try:
+        pose_service = get_pose_service()
+        pose_state, confidence = pose_service.detect_pose(thumbnail_bytes)
+
+        if confidence > 0.5:  # Only use confident detections
+            return pose_state.value
+        return None
+
+    except Exception as e:
+        logger.debug(f"Pose detection error: {e}")
+        return None
 
 
 def cleanup_stale_caches():
@@ -470,8 +505,14 @@ class ReIDWorker:
             logger.warning(f"Failed to fetch thumbnail for {frigate_id}")
             return
 
+        # Store raw bytes for pose detection before rotation
+        thumbnail_bytes_for_pose = thumbnail
+
         # Rotate thumbnail if camera is mounted sideways (e.g., cam_040)
         thumbnail = self._rotate_thumbnail_if_needed(thumbnail, camera_id)
+
+        # Detect pose (sampled, non-blocking)
+        pose_state = detect_pose_from_thumbnail(thumbnail_bytes_for_pose)
 
         # Extract embedding
         embedding = await self.reid_service.extract_features(thumbnail)
@@ -529,13 +570,14 @@ class ReIDWorker:
                     # Update color histogram
                     self._update_person_color_histogram(person_id, color_hist)
 
-                    # Record sighting with zone info
+                    # Record sighting with zone info and pose state
                     sighting = PersonSighting(
                         person_id=person_id,
                         camera_id=camera_id,
                         frigate_event_id=frigate_id,
                         zone_name=zone_name,
-                        confidence=data.get("score", 1.0)
+                        confidence=data.get("score", 1.0),
+                        pose_state=pose_state
                     )
                     db.add(sighting)
 
@@ -548,6 +590,7 @@ class ReIDWorker:
                             .tag("zone", zone_name or "unknown") \
                             .tag("classification", classification) \
                             .tag("track_id", person.display_id) \
+                            .tag("pose", pose_state or "unknown") \
                             .field("confidence", float(data.get("score", 1.0)))
                         write_api.write(bucket=INFLUXDB_BUCKET, org=INFLUXDB_ORG, record=point)
                     except Exception as e:
@@ -576,7 +619,7 @@ class ReIDWorker:
                     if self._should_create_person(camera_id, frigate_id, embedding, color_hist):
                         # Create new person after verification
                         person = await self._create_new_person(
-                            db, embedding, camera_id, frigate_id, data, color_hist
+                            db, embedding, camera_id, frigate_id, data, color_hist, pose_state
                         )
                         _active_tracks[frigate_id] = person.id
                         _person_last_camera[person.id] = (camera_id, datetime.utcnow())
@@ -875,8 +918,9 @@ class ReIDWorker:
 
     async def _create_new_person(self, db, embedding: np.ndarray, camera_id: str,
                                   frigate_id: str, data: dict,
-                                  color_hist: np.ndarray = None) -> TrackedPerson:
-        """Create a new tracked person with color histogram."""
+                                  color_hist: np.ndarray = None,
+                                  pose_state: str = None) -> TrackedPerson:
+        """Create a new tracked person with color histogram and pose state."""
         import string
 
         # Generate display ID
@@ -918,13 +962,14 @@ class ReIDWorker:
         # Get zone name from mapping or fallback to Frigate zones
         zone_name = CAMERA_ZONES.get(camera_id, ",".join(data.get("current_zones", [])))
 
-        # Add sighting
+        # Add sighting with pose state
         sighting = PersonSighting(
             person_id=person.id,
             camera_id=camera_id,
             frigate_event_id=frigate_id,
             zone_name=zone_name,
-            confidence=data.get("score", 1.0)
+            confidence=data.get("score", 1.0),
+            pose_state=pose_state
         )
         db.add(sighting)
 
@@ -936,6 +981,7 @@ class ReIDWorker:
                 .tag("zone", zone_name or "unknown") \
                 .tag("classification", "customer") \
                 .tag("track_id", person.display_id) \
+                .tag("pose", pose_state or "unknown") \
                 .field("confidence", float(data.get("score", 1.0)))
             write_api.write(bucket=INFLUXDB_BUCKET, org=INFLUXDB_ORG, record=point)
         except Exception as e:

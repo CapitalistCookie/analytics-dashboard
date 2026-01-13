@@ -436,6 +436,21 @@ export const getQueueHistory = (zone?: string, hours?: number) =>
 export const getAllQueues = () =>
   api.get<Record<string, QueueStatus>>('/analytics/queue/all')
 
+// Pose Estimation types
+export interface PoseStats {
+  total_active: number
+  seated: number
+  standing: number
+  unknown: number
+  seated_by_zone: Record<string, number>
+  standing_by_zone: Record<string, number>
+  updated_at: string
+}
+
+// Pose Estimation endpoints
+export const getPoseStats = () =>
+  api.get<PoseStats>('/analytics/pose/stats')
+
 // Search types
 export interface SearchResult {
   id: string

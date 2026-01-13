@@ -342,6 +342,7 @@ class PersonSighting(Base):
     enter_time = Column(DateTime, default=datetime.utcnow)
     exit_time = Column(DateTime, nullable=True)
     confidence = Column(Float, default=1.0)
+    pose_state = Column(String(20), nullable=True)  # "seated", "standing", "unknown"
     created_at = Column(DateTime, default=datetime.utcnow)
 
     person = relationship("TrackedPerson", backref="sightings")

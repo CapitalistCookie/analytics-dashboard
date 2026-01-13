@@ -648,3 +648,67 @@ async def get_all_queues(db: Session = Depends(get_db)):
         }
 
     return result
+
+
+# ==================== Pose Estimation Endpoints ====================
+
+class PoseStats(BaseModel):
+    total_active: int
+    seated: int
+    standing: int
+    unknown: int
+    seated_by_zone: dict[str, int]
+    standing_by_zone: dict[str, int]
+    updated_at: str
+
+
+@router.get("/pose/stats", response_model=PoseStats)
+async def get_pose_stats(db: Session = Depends(get_db)):
+    """
+    Get current pose statistics - how many people are seated vs standing.
+
+    This uses pose_state from PersonSighting records.
+    """
+    from models import PersonSighting, TrackedPerson
+    from datetime import timedelta
+
+    now = datetime.utcnow()
+    cutoff = now - timedelta(minutes=30)
+
+    # Get active sightings (no exit_time)
+    active_sightings = db.query(PersonSighting).join(
+        TrackedPerson, PersonSighting.person_id == TrackedPerson.id
+    ).filter(
+        PersonSighting.exit_time.is_(None),
+        PersonSighting.enter_time >= cutoff,
+        TrackedPerson.is_active == True
+    ).all()
+
+    seated = 0
+    standing = 0
+    unknown = 0
+    seated_by_zone: dict[str, int] = {}
+    standing_by_zone: dict[str, int] = {}
+
+    for sighting in active_sightings:
+        zone = sighting.zone_name or "unknown"
+        pose = sighting.pose_state
+
+        if pose == "seated":
+            seated += 1
+            seated_by_zone[zone] = seated_by_zone.get(zone, 0) + 1
+        elif pose == "standing":
+            standing += 1
+            standing_by_zone[zone] = standing_by_zone.get(zone, 0) + 1
+        else:
+            unknown += 1
+
+    return PoseStats(
+        total_active=len(active_sightings),
+        seated=seated,
+        standing=standing,
+        unknown=unknown,
+        seated_by_zone=seated_by_zone,
+        standing_by_zone=standing_by_zone,
+        updated_at=now.isoformat()
+    )
