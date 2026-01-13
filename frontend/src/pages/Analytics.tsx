@@ -24,6 +24,8 @@ import {
   type OccupancyPoint,
   type AnalyticsSummaryV2
 } from '../api/client'
+import ZoneHeatMap from '../components/ZoneHeatMap'
+import PoseStatsWidget from '../components/PoseStatsWidget'
 
 const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#06b6d4', '#84cc16']
 const HEATMAP_COLORS = ['#1f2937', '#1e3a5f', '#1d4ed8', '#2563eb', '#3b82f6', '#60a5fa', '#93c5fd']
@@ -464,6 +466,16 @@ export default function Analytics() {
         <div className="bg-gray-800 rounded-lg p-4 md:p-6 lg:col-span-2">
           <h3 className="text-base md:text-lg font-semibold text-white mb-3 md:mb-4">Weekly Activity Heatmap</h3>
           <DayHourHeatmap data={heatmapData} />
+        </div>
+
+        {/* Zone Floor Plan Heat Map */}
+        <div className="lg:col-span-2">
+          <ZoneHeatMap refreshInterval={15000} showLabels={true} />
+        </div>
+
+        {/* Pose Stats Widget */}
+        <div className="lg:col-span-1">
+          <PoseStatsWidget refreshInterval={10000} />
         </div>
       </div>
     </div>
