@@ -91,7 +91,9 @@ ROTATED_CAMERAS = {
 # LOW_TRUST: Top-down views - lower quality ReID but still functional
 
 # Entry cameras - can create new person IDs (customers enter through these)
-ENTRY_CAMERAS = {"entrance", "bar_lounge"}
+# Note: Added cashier since entrance camera is picking up parking lot (cars/bikes)
+# and bar_lounge has limited visibility. Cashier is customer-facing and detecting people.
+ENTRY_CAMERAS = {"entrance", "bar_lounge", "cashier"}
 
 # High trust cameras - good angle for embedding extraction
 HIGH_TRUST_CAMERAS = {"entrance", "bar_lounge", "seating", "cashier", "food_pickup"}
