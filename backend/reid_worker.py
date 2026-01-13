@@ -19,9 +19,10 @@ from contextlib import asynccontextmanager
 import httpx
 import numpy as np
 
-from database import SessionLocal
+from database import SessionLocal, InfluxDBConnection, INFLUXDB_BUCKET, INFLUXDB_ORG
 from models import TrackedPerson, PersonEmbedding, PersonSighting, Staff
 from reid_service import get_reid_service
+from influxdb_client import Point
 
 logger = logging.getLogger(__name__)
 
@@ -516,6 +517,20 @@ class ReIDWorker:
                     )
                     db.add(sighting)
 
+                    # Write detection to InfluxDB for traffic analytics
+                    try:
+                        write_api = InfluxDBConnection.get_write_api()
+                        classification = "staff" if person.staff_id else "customer"
+                        point = Point("person_detection") \
+                            .tag("camera", camera_id) \
+                            .tag("zone", zone_name or "unknown") \
+                            .tag("classification", classification) \
+                            .tag("track_id", person.display_id) \
+                            .field("confidence", float(data.get("score", 1.0)))
+                        write_api.write(bucket=INFLUXDB_BUCKET, org=INFLUXDB_ORG, record=point)
+                    except Exception as e:
+                        logger.warning(f"Failed to write detection to InfluxDB: {e}")
+
                     _active_tracks[frigate_id] = person_id
                     logger.info(f"Matched {frigate_id} to person {person.display_id} (similarity: {similarity:.2f})")
 
@@ -591,8 +606,28 @@ class ReIDWorker:
                 PersonSighting.person_id == person_id,
                 PersonSighting.frigate_event_id == frigate_id
             ).first()
+            dwell_seconds = 0
+            zone_name = None
             if sighting:
-                sighting.exit_time = datetime.utcnow()
+                exit_time = datetime.utcnow()
+                sighting.exit_time = exit_time
+                zone_name = sighting.zone_name
+                # Calculate dwell time
+                dwell_seconds = int((exit_time - sighting.enter_time).total_seconds())
+
+                # Write dwell time to InfluxDB
+                try:
+                    write_api = InfluxDBConnection.get_write_api()
+                    point = Point("zone_activity") \
+                        .tag("camera", camera_id) \
+                        .tag("zone", zone_name or "unknown") \
+                        .tag("person_id", str(person_id)) \
+                        .field("dwell_time", float(dwell_seconds)) \
+                        .field("person_count", 1)
+                    write_api.write(bucket=INFLUXDB_BUCKET, org=INFLUXDB_ORG, record=point)
+                    logger.debug(f"Wrote dwell time {dwell_seconds}s to InfluxDB for zone {zone_name}")
+                except Exception as e:
+                    logger.warning(f"Failed to write dwell time to InfluxDB: {e}")
 
             # Check if person is still visible on any camera
             if person_id not in _active_tracks.values():
@@ -601,7 +636,7 @@ class ReIDWorker:
                     person.is_active = False
 
             db.commit()
-            logger.info(f"Person {person_id} left camera {camera_id}")
+            logger.info(f"Person {person_id} left camera {camera_id} (dwell: {dwell_seconds}s)")
 
         finally:
             db.close()
@@ -870,6 +905,19 @@ class ReIDWorker:
             confidence=data.get("score", 1.0)
         )
         db.add(sighting)
+
+        # Write detection to InfluxDB for traffic analytics
+        try:
+            write_api = InfluxDBConnection.get_write_api()
+            point = Point("person_detection") \
+                .tag("camera", camera_id) \
+                .tag("zone", zone_name or "unknown") \
+                .tag("classification", "customer") \
+                .tag("track_id", person.display_id) \
+                .field("confidence", float(data.get("score", 1.0)))
+            write_api.write(bucket=INFLUXDB_BUCKET, org=INFLUXDB_ORG, record=point)
+        except Exception as e:
+            logger.warning(f"Failed to write new person detection to InfluxDB: {e}")
 
         _last_embedding_time[person.id] = datetime.utcnow()
 

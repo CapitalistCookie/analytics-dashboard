@@ -179,3 +179,103 @@ class TestDateRangeFiltering:
         for range_val in ["today", "week", "month"]:
             response = client.get(f"/api/analytics/summary?range={range_val}")
             assert response.status_code == 200
+
+
+class TestDwellTimeEndpoints:
+    """Test dwell time analytics endpoints."""
+
+    def test_get_dwell_by_zone(self, client):
+        """Test getting average dwell times by zone."""
+        response = client.get("/api/analytics/dwell/by-zone")
+        assert response.status_code == 200
+        data = response.json()
+        assert isinstance(data, list)
+
+        if len(data) > 0:
+            zone = data[0]
+            assert "zone" in zone
+            assert "avg_dwell_seconds" in zone
+            assert "avg_dwell_minutes" in zone
+
+    def test_get_dwell_by_zone_with_date(self, client):
+        """Test getting dwell times with date filter."""
+        response = client.get("/api/analytics/dwell/by-zone?date=2024-01-01")
+        assert response.status_code == 200
+        data = response.json()
+        assert isinstance(data, list)
+
+    def test_get_dwell_by_zone_with_days(self, client):
+        """Test getting dwell times with days parameter."""
+        response = client.get("/api/analytics/dwell/by-zone?days=7")
+        assert response.status_code == 200
+        data = response.json()
+        assert isinstance(data, list)
+
+    def test_get_average_dwell(self, client):
+        """Test getting overall average dwell time."""
+        response = client.get("/api/analytics/dwell/average")
+        assert response.status_code == 200
+        data = response.json()
+
+        assert "avg_seconds" in data
+        assert "avg_minutes" in data
+        assert "total_events" in data
+        assert isinstance(data["avg_seconds"], (int, float))
+        assert isinstance(data["avg_minutes"], (int, float))
+        assert isinstance(data["total_events"], int)
+
+    def test_get_dwell_distribution(self, client):
+        """Test getting dwell time distribution buckets."""
+        response = client.get("/api/analytics/dwell/distribution")
+        assert response.status_code == 200
+        data = response.json()
+        assert isinstance(data, list)
+
+        if len(data) > 0:
+            bucket = data[0]
+            assert "bucket" in bucket
+            assert "count" in bucket
+            assert "percentage" in bucket
+
+    def test_get_visit_duration_stats(self, client):
+        """Test getting visit duration statistics."""
+        response = client.get("/api/analytics/dwell/visit-stats")
+        assert response.status_code == 200
+        data = response.json()
+
+        assert "avg_visit_minutes" in data
+        assert "min_visit_minutes" in data
+        assert "max_visit_minutes" in data
+        assert "total_visits" in data
+
+    def test_get_hourly_dwell_trend(self, client):
+        """Test getting hourly dwell time trend."""
+        response = client.get("/api/analytics/dwell/hourly-trend")
+        assert response.status_code == 200
+        data = response.json()
+        assert isinstance(data, list)
+
+        # Should have 24 hours
+        assert len(data) == 24
+
+        if len(data) > 0:
+            hour_data = data[0]
+            assert "hour" in hour_data
+            assert "avg_dwell_minutes" in hour_data
+            assert "count" in hour_data
+
+    def test_get_dwell_summary(self, client):
+        """Test getting comprehensive dwell time summary."""
+        response = client.get("/api/analytics/dwell/summary")
+        assert response.status_code == 200
+        data = response.json()
+
+        assert "avg_dwell_seconds" in data
+        assert "avg_dwell_minutes" in data
+        assert "total_sightings" in data
+        assert "avg_visit_minutes" in data
+        assert "total_visits" in data
+        assert "longest_dwell_zone" in data
+        assert "busiest_zone" in data
+        assert "zones" in data
+        assert isinstance(data["zones"], list)

@@ -256,6 +256,30 @@ export interface DwellDistribution {
   percentage: number
 }
 
+export interface VisitDurationStats {
+  avg_visit_minutes: number
+  min_visit_minutes: number
+  max_visit_minutes: number
+  total_visits: number
+}
+
+export interface HourlyDwellTrend {
+  hour: string
+  avg_dwell_minutes: number
+  count: number
+}
+
+export interface DwellSummary {
+  avg_dwell_seconds: number
+  avg_dwell_minutes: number
+  total_sightings: number
+  avg_visit_minutes: number
+  total_visits: number
+  longest_dwell_zone: string
+  busiest_zone: string
+  zones: DwellByZone[]
+}
+
 export interface PeakHour {
   hour: string
   avg_count: number
@@ -332,6 +356,15 @@ export const getDwellAverage = (date?: string, days?: number) =>
 
 export const getDwellDistribution = (date?: string, days?: number) =>
   api.get<DwellDistribution[]>('/analytics/dwell/distribution', { params: { date, days } })
+
+export const getVisitDurationStats = (date?: string, days?: number) =>
+  api.get<VisitDurationStats>('/analytics/dwell/visit-stats', { params: { date, days } })
+
+export const getHourlyDwellTrend = (date?: string) =>
+  api.get<HourlyDwellTrend[]>('/analytics/dwell/hourly-trend', { params: { date } })
+
+export const getDwellSummary = (date?: string, days?: number) =>
+  api.get<DwellSummary>('/analytics/dwell/summary', { params: { date, days } })
 
 export const getPeakHours = (days?: number) =>
   api.get<PeakHour[]>('/analytics/peak-hours', { params: { days } })

@@ -5,11 +5,14 @@ import io
 from datetime import datetime, timedelta
 from typing import Optional
 
-from fastapi import APIRouter, Query, Response
+from fastapi import APIRouter, Query, Response, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
 from services.influxdb_service import InfluxDBAnalyticsService
+from services.dwell_time_service import DwellTimeService
+from database import get_db
 
 router = APIRouter(prefix="/api/analytics", tags=["analytics"])
 
@@ -174,31 +177,57 @@ async def get_traffic_by_camera(
 @router.get("/dwell/by-zone", response_model=list[DwellByZone])
 async def get_dwell_by_zone(
     date: str = Query(None, description="Date in YYYY-MM-DD format"),
-    days: int = Query(1, ge=1, le=30, description="Number of days to query")
+    days: int = Query(1, ge=1, le=30, description="Number of days to query"),
+    db: Session = Depends(get_db)
 ):
-    """Get average dwell times by zone."""
+    """Get average dwell times by zone. Falls back to SQLite if InfluxDB has no data."""
+    # Try InfluxDB first
     data = InfluxDBAnalyticsService.get_dwell_times_by_zone(date=date, days=days)
-    return [DwellByZone(**item) for item in data]
+    if data:
+        return [DwellByZone(**item) for item in data]
+
+    # Fall back to SQLite-based calculation
+    sqlite_data = DwellTimeService.get_dwell_by_zone(db, date=date, days=days)
+    return [DwellByZone(
+        zone=item["zone"],
+        avg_dwell_seconds=item["avg_dwell_seconds"],
+        avg_dwell_minutes=item["avg_dwell_minutes"]
+    ) for item in sqlite_data]
 
 
 @router.get("/dwell/average", response_model=DwellAverage)
 async def get_average_dwell(
     date: str = Query(None, description="Date in YYYY-MM-DD format"),
-    days: int = Query(1, ge=1, le=30, description="Number of days to query")
+    days: int = Query(1, ge=1, le=30, description="Number of days to query"),
+    db: Session = Depends(get_db)
 ):
-    """Get overall average dwell time."""
+    """Get overall average dwell time. Falls back to SQLite if InfluxDB has no data."""
+    # Try InfluxDB first
     data = InfluxDBAnalyticsService.get_average_dwell_time(date=date, days=days)
-    return DwellAverage(**data)
+    if data.get("total_events", 0) > 0:
+        return DwellAverage(**data)
+
+    # Fall back to SQLite-based calculation
+    sqlite_data = DwellTimeService.get_average_dwell_time(db, date=date, days=days)
+    return DwellAverage(**sqlite_data)
 
 
 @router.get("/dwell/distribution", response_model=list[DwellDistribution])
 async def get_dwell_distribution(
     date: str = Query(None, description="Date in YYYY-MM-DD format"),
-    days: int = Query(1, ge=1, le=30, description="Number of days to query")
+    days: int = Query(1, ge=1, le=30, description="Number of days to query"),
+    db: Session = Depends(get_db)
 ):
-    """Get dwell time distribution in buckets."""
+    """Get dwell time distribution in buckets. Falls back to SQLite if InfluxDB has no data."""
+    # Try InfluxDB first
     data = InfluxDBAnalyticsService.get_dwell_distribution(date=date, days=days)
-    return [DwellDistribution(**item) for item in data]
+    total_count = sum(item.get("count", 0) for item in data)
+    if total_count > 0:
+        return [DwellDistribution(**item) for item in data]
+
+    # Fall back to SQLite-based calculation
+    sqlite_data = DwellTimeService.get_dwell_distribution(db, date=date, days=days)
+    return [DwellDistribution(**item) for item in sqlite_data]
 
 
 # ==================== Peak Hours Endpoints ====================
@@ -426,3 +455,61 @@ async def get_live_occupancy():
     """Get current live occupancy from InfluxDB."""
     data = InfluxDBAnalyticsService.get_current_occupancy()
     return data
+
+
+# ==================== Enhanced Dwell Time Endpoints (SQLite-based) ====================
+
+class VisitDurationStats(BaseModel):
+    avg_visit_minutes: float
+    min_visit_minutes: float
+    max_visit_minutes: float
+    total_visits: int
+
+
+class HourlyDwellTrend(BaseModel):
+    hour: str
+    avg_dwell_minutes: float
+    count: int
+
+
+class DwellSummary(BaseModel):
+    avg_dwell_seconds: float
+    avg_dwell_minutes: float
+    total_sightings: int
+    avg_visit_minutes: float
+    total_visits: int
+    longest_dwell_zone: str
+    busiest_zone: str
+    zones: list[dict]
+
+
+@router.get("/dwell/visit-stats", response_model=VisitDurationStats)
+async def get_visit_duration_stats(
+    date: str = Query(None, description="Date in YYYY-MM-DD format"),
+    days: int = Query(1, ge=1, le=30, description="Number of days to query"),
+    db: Session = Depends(get_db)
+):
+    """Get visit duration statistics (total time per visitor)."""
+    data = DwellTimeService.get_visit_duration_stats(db, date=date, days=days)
+    return VisitDurationStats(**data)
+
+
+@router.get("/dwell/hourly-trend", response_model=list[HourlyDwellTrend])
+async def get_hourly_dwell_trend(
+    date: str = Query(None, description="Date in YYYY-MM-DD format"),
+    db: Session = Depends(get_db)
+):
+    """Get average dwell time by hour of day."""
+    data = DwellTimeService.get_hourly_dwell_trend(db, date=date)
+    return [HourlyDwellTrend(**item) for item in data]
+
+
+@router.get("/dwell/summary", response_model=DwellSummary)
+async def get_dwell_summary(
+    date: str = Query(None, description="Date in YYYY-MM-DD format"),
+    days: int = Query(1, ge=1, le=30, description="Number of days to query"),
+    db: Session = Depends(get_db)
+):
+    """Get comprehensive dwell time summary."""
+    data = DwellTimeService.get_dwell_summary(db, date=date, days=days)
+    return DwellSummary(**data)

@@ -1,5 +1,6 @@
 """Services package for analytics dashboard."""
 
 from .influxdb_service import InfluxDBAnalyticsService
+from .dwell_time_service import DwellTimeService
 
-__all__ = ["InfluxDBAnalyticsService"]
+__all__ = ["InfluxDBAnalyticsService", "DwellTimeService"]
