@@ -436,6 +436,52 @@ export const getQueueHistory = (zone?: string, hours?: number) =>
 export const getAllQueues = () =>
   api.get<Record<string, QueueStatus>>('/analytics/queue/all')
 
+// Entry/Exit types for traffic tracking
+export interface EntryExitHour {
+  hour: string
+  hour_label: string
+  entries: number
+  exits: number
+  net: number
+}
+
+export interface EntryExitCurrent {
+  current_occupancy: number
+  entries_today: number
+  exits_today: number
+  net_today: number
+  net_change: number
+  staff_count: number
+  customer_count: number
+  last_entry: string | null
+  last_exit: string | null
+  timestamp: string
+}
+
+export interface EntryExitHourly {
+  hours: EntryExitHour[]
+  total_entries: number
+  total_exits: number
+  date: string
+}
+
+export interface EntryExitStats {
+  active_detectors: number
+  total_detectors: number
+  detection_rate: number
+  last_calibration: string | null
+}
+
+// Entry/Exit endpoints
+export const getEntryExitCurrent = () =>
+  api.get<EntryExitCurrent>('/analytics/entry-exit/current')
+
+export const getEntryExitHourly = (date?: string) =>
+  api.get<EntryExitHourly>('/analytics/entry-exit/hourly', { params: { date } })
+
+export const getEntryExitStats = () =>
+  api.get<EntryExitStats>('/analytics/entry-exit/stats')
+
 // Pose Estimation types
 export interface PoseStats {
   total_active: number
