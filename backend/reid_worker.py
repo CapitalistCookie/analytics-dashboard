@@ -70,46 +70,68 @@ ADJACENCY_BOOST = float(os.getenv("REID_ADJACENCY_BOOST", "0.05"))  # Reduced si
 # Color histogram matching threshold (0-1, higher = stricter)
 COLOR_HISTOGRAM_THRESHOLD = float(os.getenv("REID_COLOR_THRESHOLD", "0.4"))  # Minimum color similarity
 
-# Camera exclusions - these cameras don't extract embeddings (top-down views)
-EXCLUDED_CAMERAS = {"cam_068", "cam_060"}
+# Camera exclusions - top-down views (can still track but lower quality ReID)
+# Note: Even top-down cameras can do ReID on head/hair patterns, so we don't fully exclude
+EXCLUDED_CAMERAS: set = set()  # No cameras fully excluded
 
 # Cameras that need rotation before embedding extraction
 # Key: camera_id, Value: rotation degrees clockwise
 ROTATED_CAMERAS = {
-    "cam_040": 90  # Mounted sideways, rotate 90 degrees clockwise
+    "cashier": 90  # Mounted sideways, rotate 90 degrees clockwise
 }
 
-# Camera trust levels
-# High trust: can create new person IDs
-# Medium trust: can only match to existing persons
-# Excluded: no embedding extraction (top-down service cameras)
-ENTRY_CAMERAS = {"cam_009"}  # Only these can create new person IDs
-HIGH_TRUST_CAMERAS = {"cam_009", "cam_238", "cam_192"}  # Good angle for embeddings
-MEDIUM_TRUST_CAMERAS = {"cam_108", "cam_179", "cam_028", "cam_054", "cam_040"}  # Match only, don't create
+# Camera trust levels for ReID embedding quality
+# HIGH_TRUST: Good angle for embeddings, can create new person IDs
+# MEDIUM_TRUST: Can match to existing persons
+# LOW_TRUST: Top-down views - lower quality ReID but still functional
 
-# Camera-to-zone mapping
+# Entry cameras - can create new person IDs (customers enter through these)
+ENTRY_CAMERAS = {"entrance", "bar_lounge"}
+
+# High trust cameras - good angle for embedding extraction
+HIGH_TRUST_CAMERAS = {"entrance", "bar_lounge", "seating", "cashier", "food_pickup"}
+
+# Medium trust cameras - can match but lower priority for embedding storage
+MEDIUM_TRUST_CAMERAS = {"vip_room", "karaoke", "kitchen", "patio"}
+
+# Low trust cameras - top-down views, ReID on head/hair patterns only
+LOW_TRUST_CAMERAS = {"bar"}
+
+# Staff-only areas - detections here classified as staff if unmatched
+STAFF_ONLY_CAMERAS = {"bar", "food_pickup", "kitchen"}
+
+# Camera-to-zone mapping (Frigate camera names map to logical zones)
+# Note: Since Frigate already uses zone names as camera IDs, these map 1:1
 CAMERA_ZONES: Dict[str, str] = {
-    "cam_009": "entrance",
-    "cam_054": "hallway",
-    "cam_028": "seating_main",
-    "cam_192": "seating_service",
-    "cam_179": "service_area",
-    "cam_040": "cashier",
-    "cam_108": "kitchen",
-    "cam_239": "kitchen_prep",
+    "entrance": "entrance",
+    "bar_lounge": "bar_lounge",
+    "seating": "seating",
+    "cashier": "cashier",
+    "vip_room": "vip_room",
+    "karaoke": "karaoke",
+    "bar": "bar",
+    "food_pickup": "food_pickup",
+    "kitchen": "kitchen",
+    "patio": "patio",
 }
 
-# Camera adjacency graph - defines which cameras can see handoffs
-# Format: camera_id -> list of adjacent camera_ids (direction of travel)
+# Camera adjacency graph - defines physical proximity for cross-camera matching
+# Based on actual floor plan layout:
+#   entrance → bar_lounge → [cashier, seating, bar]
+#   cashier connects bar_lounge to vip_room
+#   seating is main customer area
+#   food_pickup/kitchen are staff service areas
 CAMERA_ADJACENCY: Dict[str, List[str]] = {
-    "cam_009": ["cam_054"],  # entrance -> hallway
-    "cam_054": ["cam_009", "cam_028", "cam_192"],  # hallway connects to multiple
-    "cam_028": ["cam_054", "cam_192", "cam_040"],  # seating_main
-    "cam_192": ["cam_054", "cam_028", "cam_179"],  # seating_service
-    "cam_179": ["cam_192", "cam_108"],  # service_area
-    "cam_040": ["cam_028", "cam_054"],  # cashier
-    "cam_108": ["cam_179", "cam_239"],  # kitchen
-    "cam_239": ["cam_108"],  # kitchen_prep
+    "entrance": ["bar_lounge"],
+    "bar_lounge": ["entrance", "cashier", "seating", "bar"],
+    "cashier": ["bar_lounge", "vip_room", "seating"],
+    "seating": ["bar_lounge", "cashier", "patio"],
+    "vip_room": ["cashier", "karaoke"],
+    "karaoke": ["vip_room"],
+    "bar": ["bar_lounge", "food_pickup"],
+    "food_pickup": ["bar", "kitchen"],
+    "kitchen": ["food_pickup"],
+    "patio": ["seating"],
 }
 
 # Tracking state
