@@ -229,33 +229,41 @@ async def get_camera(camera_id: str):
 # Analytics endpoints
 @app.get("/api/analytics/occupancy", response_model=OccupancyData)
 async def get_current_occupancy():
-    """Get current occupancy count from InfluxDB."""
+    """Get current occupancy from Frigate's active in-progress events."""
     try:
-        query_api = InfluxDBConnection.get_query_api()
-        # Query for person counts in the last minute
-        query = f'''
-        from(bucket: "{INFLUXDB_BUCKET}")
-            |> range(start: -1m)
-            |> filter(fn: (r) => r._measurement == "person_count")
-            |> last()
-        '''
-        result = query_api.query(query, org=INFLUXDB_ORG)
+        # Get currently active person detections from Frigate (real-time, not cumulative)
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(f"{FRIGATE_URL}/api/events", params={
+                "in_progress": 1,
+                "label": "person",
+                "limit": 100
+            })
+            response.raise_for_status()
+            events = response.json()
+
         by_camera = {}
-        total = 0
-        for table in result:
-            for record in table.records:
-                camera = record.values.get("camera", "unknown")
-                count = record.get_value()
-                by_camera[camera] = count
-                total += count
+        for event in events:
+            camera = event.get("camera", "unknown")
+            by_camera[camera] = by_camera.get(camera, 0) + 1
+
+        total = len(events)
+
+        # Get zone breakdown from active events
+        by_zone = {}
+        for event in events:
+            zones = event.get("current_zones", []) or event.get("entered_zones", [])
+            for zone in zones:
+                by_zone[zone] = by_zone.get(zone, 0) + 1
+
         return OccupancyData(
             timestamp=datetime.utcnow(),
             total_count=total,
             by_camera=by_camera,
-            by_zone={}  # Will be populated when zones are configured
+            by_zone=by_zone
         )
     except Exception as e:
-        # Return zeros if InfluxDB is not available
+        logger.warning(f"Failed to get occupancy from Frigate: {e}")
+        # Return zeros if Frigate is not available
         return OccupancyData(
             timestamp=datetime.utcnow(),
             total_count=0,
@@ -267,21 +275,26 @@ async def get_occupancy_history(hours: int = 24):
     """Get historical occupancy data."""
     try:
         query_api = InfluxDBConnection.get_query_api()
+        # Query person_detection measurement and aggregate by 5-minute windows
         query = f'''
         from(bucket: "{INFLUXDB_BUCKET}")
             |> range(start: -{hours}h)
-            |> filter(fn: (r) => r._measurement == "person_count")
-            |> aggregateWindow(every: 5m, fn: mean)
-            |> yield(name: "mean")
+            |> filter(fn: (r) => r._measurement == "person_detection")
+            |> filter(fn: (r) => r._field == "confidence")
+            |> group()
+            |> aggregateWindow(every: 5m, fn: count, createEmpty: true)
+            |> yield(name: "count")
         '''
         result = query_api.query(query, org=INFLUXDB_ORG)
         history = []
         for table in result:
             for record in table.records:
+                count = record.get_value()
                 history.append({
                     "timestamp": record.get_time().isoformat(),
-                    "camera": record.values.get("camera", "unknown"),
-                    "count": record.get_value()
+                    "total_count": int(count) if count else 0,
+                    "by_camera": {},
+                    "by_zone": {}
                 })
         return {"history": history}
     except Exception as e:

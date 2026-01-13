@@ -57,14 +57,14 @@ function OccupancyCard() {
 }
 
 function OccupancyChart() {
-  const [history, setHistory] = useState<OccupancyData[]>([])
+  const [history, setHistory] = useState<Array<{timestamp: string, count?: number, total_count?: number}>>([])
 
   useEffect(() => {
     const fetchData = async () => {
       try {
         const res = await getOccupancyHistory(24)
-        // API returns {history: [...], error?: string}
-        const data = res.data?.history || []
+        // API can return {history: [...]} or [...] directly
+        const data = res.data?.history || (Array.isArray(res.data) ? res.data : [])
         setHistory(Array.isArray(data) ? data : [])
       } catch (err) {
         console.error('Failed to fetch history:', err)
@@ -75,7 +75,7 @@ function OccupancyChart() {
 
   const chartData = history.map((d) => ({
     time: new Date(d.timestamp).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
-    total: d.total_count,
+    total: d.total_count ?? d.count ?? 0,
   }))
 
   return (
