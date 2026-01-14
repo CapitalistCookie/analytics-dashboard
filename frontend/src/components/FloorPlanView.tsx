@@ -187,6 +187,13 @@ export function FloorPlanView({ className = '' }: FloorPlanViewProps) {
   const [isSaving, setIsSaving] = useState(false)
   const svgRef = useRef<SVGSVGElement>(null)
 
+  // Mobile zoom and pan state
+  const [scale, setScale] = useState(1)
+  const [panOffset, setPanOffset] = useState({ x: 0, y: 0 })
+  const lastTouchRef = useRef<{ x: number; y: number; dist: number; scale: number } | null>(null)
+  const isPanningRef = useRef(false)
+  const containerRef = useRef<HTMLDivElement>(null)
+
   // Fetch positions and flow connections from backend on mount
   useEffect(() => {
     const fetchPositions = async () => {
@@ -353,6 +360,101 @@ export function FloorPlanView({ className = '' }: FloorPlanViewProps) {
       setHasUnsavedChanges(true)
     }
   }, [draggingCamera, isEditMode, getSvgCoordinates])
+
+  // Touch handlers for pinch-to-zoom and pan (mobile)
+  const handleTouchStart = useCallback((e: React.TouchEvent) => {
+    // Don't interfere with camera dragging in edit mode
+    if (isEditMode || isEditingFlows) return
+
+    if (e.touches.length === 2) {
+      // Pinch start - calculate initial distance
+      const dist = Math.hypot(
+        e.touches[0].clientX - e.touches[1].clientX,
+        e.touches[0].clientY - e.touches[1].clientY
+      )
+      lastTouchRef.current = {
+        x: (e.touches[0].clientX + e.touches[1].clientX) / 2,
+        y: (e.touches[0].clientY + e.touches[1].clientY) / 2,
+        dist,
+        scale,
+      }
+      isPanningRef.current = false
+    } else if (e.touches.length === 1 && scale > 1) {
+      // Pan start (only when zoomed in)
+      lastTouchRef.current = {
+        x: e.touches[0].clientX,
+        y: e.touches[0].clientY,
+        dist: 0,
+        scale,
+      }
+      isPanningRef.current = true
+    }
+  }, [isEditMode, isEditingFlows, scale])
+
+  const handleTouchMove = useCallback((e: React.TouchEvent) => {
+    if (isEditMode || isEditingFlows || !lastTouchRef.current) return
+
+    if (e.touches.length === 2) {
+      // Pinch zoom
+      const dist = Math.hypot(
+        e.touches[0].clientX - e.touches[1].clientX,
+        e.touches[0].clientY - e.touches[1].clientY
+      )
+      const scaleDiff = dist / lastTouchRef.current.dist
+      const newScale = Math.min(3, Math.max(0.5, lastTouchRef.current.scale * scaleDiff))
+      setScale(newScale)
+
+      // Update center point for continued pinch
+      const newX = (e.touches[0].clientX + e.touches[1].clientX) / 2
+      const newY = (e.touches[0].clientY + e.touches[1].clientY) / 2
+      lastTouchRef.current = {
+        ...lastTouchRef.current,
+        x: newX,
+        y: newY,
+        dist,
+      }
+    } else if (e.touches.length === 1 && isPanningRef.current && scale > 1) {
+      // Pan (only when zoomed in)
+      const dx = e.touches[0].clientX - lastTouchRef.current.x
+      const dy = e.touches[0].clientY - lastTouchRef.current.y
+
+      // Constrain pan to reasonable bounds
+      const maxPan = (scale - 1) * 150
+      setPanOffset(prev => ({
+        x: Math.max(-maxPan, Math.min(maxPan, prev.x + dx)),
+        y: Math.max(-maxPan, Math.min(maxPan, prev.y + dy)),
+      }))
+
+      lastTouchRef.current.x = e.touches[0].clientX
+      lastTouchRef.current.y = e.touches[0].clientY
+    }
+  }, [isEditMode, isEditingFlows, scale])
+
+  const handleTouchEnd = useCallback(() => {
+    lastTouchRef.current = null
+    isPanningRef.current = false
+  }, [])
+
+  // Reset zoom and pan
+  const resetZoom = useCallback(() => {
+    setScale(1)
+    setPanOffset({ x: 0, y: 0 })
+  }, [])
+
+  // Zoom controls
+  const zoomIn = useCallback(() => {
+    setScale(s => Math.min(3, s + 0.5))
+  }, [])
+
+  const zoomOut = useCallback(() => {
+    setScale(s => {
+      const newScale = Math.max(0.5, s - 0.5)
+      if (newScale <= 1) {
+        setPanOffset({ x: 0, y: 0 }) // Reset pan when zooming out to 1x
+      }
+      return newScale
+    })
+  }, [])
 
   // Filter to active journeys (seen in last 5 min)
   const activeJourneys = useMemo(() => {
@@ -577,16 +679,69 @@ export function FloorPlanView({ className = '' }: FloorPlanViewProps) {
       )}
 
       {/* Floor plan SVG */}
-      <div className="relative">
+      <div
+        ref={containerRef}
+        className="relative floor-plan-container overflow-hidden rounded-lg"
+        onTouchStart={handleTouchStart}
+        onTouchMove={(e) => {
+          // Handle both drag (edit mode) and pinch-zoom
+          if (draggingCamera && isEditMode) {
+            handleDrag(e)
+          } else {
+            handleTouchMove(e)
+          }
+        }}
+        onTouchEnd={() => {
+          setDraggingCamera(null)
+          handleTouchEnd()
+        }}
+      >
+        {/* Mobile zoom controls */}
+        <div className="absolute top-2 right-2 z-10 flex gap-1 md:hidden">
+          <button
+            onClick={zoomIn}
+            className="bg-gray-700/90 text-white w-10 h-10 rounded-lg tap-target flex items-center justify-center text-xl font-bold hover:bg-gray-600 transition-colors"
+            aria-label="Zoom in"
+          >
+            +
+          </button>
+          <button
+            onClick={zoomOut}
+            className="bg-gray-700/90 text-white w-10 h-10 rounded-lg tap-target flex items-center justify-center text-xl font-bold hover:bg-gray-600 transition-colors"
+            aria-label="Zoom out"
+          >
+            -
+          </button>
+          {scale !== 1 && (
+            <button
+              onClick={resetZoom}
+              className="bg-gray-700/90 text-white px-3 h-10 rounded-lg tap-target flex items-center justify-center text-xs font-medium hover:bg-gray-600 transition-colors"
+              aria-label="Reset zoom"
+            >
+              Reset
+            </button>
+          )}
+        </div>
+
+        {/* Zoom indicator */}
+        {scale !== 1 && (
+          <div className="absolute top-2 left-2 z-10 bg-gray-800/90 text-white px-2 py-1 rounded text-xs font-medium">
+            {Math.round(scale * 100)}%
+          </div>
+        )}
+
         <svg
           ref={svgRef}
           viewBox="0 0 100 100"
-          className={`w-full h-[500px] md:h-[650px] bg-gray-900 rounded-lg ${isEditMode || isEditingFlows ? 'cursor-crosshair' : ''}`}
+          className={`w-full h-[400px] md:h-[500px] lg:h-[650px] bg-gray-900 rounded-lg floor-plan-mobile ${isEditMode || isEditingFlows ? 'cursor-crosshair' : ''}`}
+          style={{
+            transform: `scale(${scale}) translate(${panOffset.x / scale}px, ${panOffset.y / scale}px)`,
+            transformOrigin: 'center center',
+            transition: scale === 1 ? 'transform 0.2s ease-out' : 'none',
+          }}
           onMouseMove={handleDrag}
           onMouseUp={() => setDraggingCamera(null)}
           onMouseLeave={() => setDraggingCamera(null)}
-          onTouchMove={handleDrag}
-          onTouchEnd={() => setDraggingCamera(null)}
         >
           {/* Grid pattern and arrow markers */}
           <defs>
@@ -914,8 +1069,9 @@ export function FloorPlanView({ className = '' }: FloorPlanViewProps) {
 
       {/* Person legend (only when not in edit mode) */}
       {!isEditMode && (
-        <div className="mt-4">
-          <div className="flex flex-wrap gap-2">
+        <div className="mt-3 md:mt-4">
+          {/* Horizontal scroll on mobile, wrap on desktop */}
+          <div className="flex gap-2 overflow-x-auto pb-2 md:flex-wrap md:overflow-visible hide-scrollbar">
             {displayedJourneys.length === 0 ? (
               <p className="text-gray-500 text-sm">No active persons detected</p>
             ) : (
@@ -929,23 +1085,23 @@ export function FloorPlanView({ className = '' }: FloorPlanViewProps) {
                         selectedPersonId === journey.display_id ? null : journey.display_id
                       )
                     }
-                    className={`flex items-center gap-2 px-3 py-1.5 rounded-lg transition-colors ${
+                    className={`flex items-center gap-2 px-3 py-2 rounded-lg transition-colors tap-target flex-shrink-0 ${
                       selectedPersonId === journey.display_id
                         ? 'bg-gray-600 ring-2 ring-blue-500'
                         : 'bg-gray-700 hover:bg-gray-600'
                     } ${!isActive ? 'opacity-50' : ''}`}
                   >
                     <span
-                      className={`w-3 h-3 rounded-full ${isActive ? 'animate-pulse' : ''}`}
+                      className={`w-3 h-3 rounded-full flex-shrink-0 ${isActive ? 'animate-pulse' : ''}`}
                       style={{ backgroundColor: getPersonColor(i) }}
                     />
-                    <span className="text-white text-sm font-medium">
+                    <span className="text-white text-sm font-medium whitespace-nowrap">
                       {journey.display_id}
                     </span>
                     {journey.is_staff && (
-                      <span className="text-xs text-blue-400">(Staff)</span>
+                      <span className="text-xs text-blue-400 whitespace-nowrap">(Staff)</span>
                     )}
-                    <span className="text-gray-400 text-xs">
+                    <span className="text-gray-400 text-xs whitespace-nowrap hidden sm:inline">
                       {journey.current_zone || 'unknown'}
                     </span>
                   </button>
@@ -960,7 +1116,12 @@ export function FloorPlanView({ className = '' }: FloorPlanViewProps) {
       <p className="text-xs text-gray-500 text-center mt-3">
         {isEditMode
           ? 'Drag cameras to reposition. Changes are saved to the server.'
-          : 'Click on a person to view their journey details'}
+          : (
+            <>
+              <span className="hidden md:inline">Click on a person to view their journey details</span>
+              <span className="md:hidden">Tap person to view details. Pinch to zoom, drag to pan.</span>
+            </>
+          )}
       </p>
     </div>
   )

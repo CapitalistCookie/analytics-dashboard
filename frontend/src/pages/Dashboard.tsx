@@ -7,6 +7,8 @@ import WebRTCGridCard from '../components/WebRTCGridCard'
 import JourneyPanel from '../components/JourneyPanel'
 import FloorPlanView from '../components/FloorPlanView'
 import QueueStatusWidget from '../components/QueueStatusWidget'
+import AnomalyAlertPanel from '../components/AnomalyAlertPanel'
+import CollapsibleCard from '../components/CollapsibleCard'
 import { useStreamQuality, QUALITY_CONFIGS, type StreamQuality } from '../context/StreamQualityContext'
 import { useCamera } from '../context/CameraContext'
 import { useWebRTCConnectionManager } from '../context/WebRTCConnectionManager'
@@ -638,7 +640,20 @@ export default function Dashboard() {
   })
 
   // WebSocket for real-time updates
-  const { occupancy: wsOccupancy, isConnected: isWsConnected, needsPolling } = useDashboardWebSocket()
+  const { occupancy: wsOccupancy, isConnected: isWsConnected, needsPolling, anomalies, clearAnomalies } = useDashboardWebSocket()
+  const [dismissedIndices, setDismissedIndices] = useState<Set<number>>(new Set())
+
+  // Filter out dismissed anomalies
+  const visibleAnomalies = anomalies.filter((_, i) => !dismissedIndices.has(i))
+
+  const handleDismissAnomaly = (index: number) => {
+    setDismissedIndices(prev => new Set(prev).add(index))
+  }
+
+  const handleClearAllAnomalies = () => {
+    clearAnomalies()
+    setDismissedIndices(new Set())
+  }
 
   useEffect(() => {
     localStorage.setItem('dashboardJourneyPanelCollapsed', String(journeyPanelCollapsed))
@@ -649,14 +664,22 @@ export default function Dashboard() {
   }, [viewMode])
 
   return (
-    <div className="space-y-4 md:space-y-6">
-      {/* Top row - stacks on mobile */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 md:gap-6">
-        <OccupancyCard
-          wsOccupancy={wsOccupancy}
-          isWsConnected={isWsConnected}
-          needsPolling={needsPolling}
-        />
+    <>
+      {/* Anomaly Alert Panel - Fixed position */}
+      <AnomalyAlertPanel
+        anomalies={visibleAnomalies}
+        onDismiss={handleDismissAnomaly}
+        onClearAll={handleClearAllAnomalies}
+      />
+
+      <div className="space-y-4 md:space-y-6">
+        {/* Top row - stacks on mobile */}
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 md:gap-6">
+          <OccupancyCard
+            wsOccupancy={wsOccupancy}
+            isWsConnected={isWsConnected}
+            needsPolling={needsPolling}
+          />
         <QueueStatusWidget zone="entrance" />
         <TodayStats />
         <RecentAlerts />
@@ -714,15 +737,26 @@ export default function Dashboard() {
             </div>
           </div>
 
-          {/* Journey Panel - full width on smaller screens */}
+          {/* Journey Panel - collapsible on mobile, full width */}
           <div className="lg:hidden">
-            <JourneyPanel />
+            <CollapsibleCard
+              title="Active Journeys"
+              defaultExpanded={false}
+              icon={
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
+                </svg>
+              }
+            >
+              <JourneyPanel />
+            </CollapsibleCard>
           </div>
         </>
       ) : (
         /* Floor Plan View */
         <FloorPlanView />
       )}
-    </div>
+      </div>
+    </>
   )
 }

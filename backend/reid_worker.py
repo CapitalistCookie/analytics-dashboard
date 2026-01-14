@@ -24,8 +24,11 @@ from sqlalchemy.orm import joinedload
 from database import SessionLocal, InfluxDBConnection, INFLUXDB_BUCKET, INFLUXDB_ORG
 from models import TrackedPerson, PersonEmbedding, PersonSighting, Staff, NegativePair
 from reid_service import get_reid_service
+from services.anomaly_service import AnomalyService
 from influxdb_client import Point
 from services.pose_service import get_pose_service, PoseState
+from services.action_service import ActionService, ActionType
+from services.customer_insights_service import CustomerInsightsService
 
 logger = logging.getLogger(__name__)
 
@@ -652,32 +655,109 @@ def is_negative_pair(person_id_a: int, person_id_b: int) -> bool:
     return False
 
 
-def detect_pose_from_thumbnail(thumbnail_bytes: bytes) -> Optional[str]:
+def detect_pose_from_thumbnail(thumbnail_bytes: bytes) -> Tuple[Optional[str], Optional[List[Dict]]]:
     """
     Detect pose from thumbnail bytes using MediaPipe.
 
-    Returns "seated", "standing", or None if detection failed/disabled.
+    Returns tuple of (pose_state, pose_landmarks) where:
+    - pose_state: "seated", "standing", or None if detection failed/disabled
+    - pose_landmarks: List of landmark dicts for action classification, or None
     """
     global _pose_sample_count
 
     if not POSE_DETECTION_ENABLED:
-        return None
+        return None, None
 
     # Sample-based pose detection to reduce overhead
     _pose_sample_count += 1
     if _pose_sample_count % POSE_SAMPLE_RATE != 0:
-        return None
+        return None, None
 
     try:
         pose_service = get_pose_service()
-        pose_state, confidence = pose_service.detect_pose(thumbnail_bytes)
 
-        if confidence > 0.5:  # Only use confident detections
-            return pose_state.value
-        return None
+        # Initialize MediaPipe if needed
+        if not pose_service._model_loaded:
+            if not pose_service.initialize():
+                return None, None
+
+        # Detect pose and get landmarks
+        from PIL import Image
+        from io import BytesIO
+        import cv2
+
+        input_buffer = BytesIO(thumbnail_bytes)
+        img = Image.open(input_buffer).convert('RGB')
+        img_array = np.array(img)
+        img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+
+        results = pose_service.pose.process(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
+
+        # Clean up
+        img.close()
+        input_buffer.close()
+
+        if not results.pose_landmarks:
+            return None, None
+
+        # Get pose state
+        pose_state, confidence = pose_service._classify_pose(results.pose_landmarks)
+
+        # Convert landmarks to list of dicts for action service
+        pose_landmarks = []
+        for lm in results.pose_landmarks.landmark:
+            pose_landmarks.append({
+                'x': lm.x,
+                'y': lm.y,
+                'z': lm.z,
+                'visibility': lm.visibility
+            })
+
+        if confidence > 0.5:
+            return pose_state.value, pose_landmarks
+        return None, pose_landmarks
 
     except Exception as e:
         logger.debug(f"Pose detection error: {e}")
+        return None, None
+
+
+def classify_action_from_landmarks(
+    pose_landmarks: Optional[List[Dict]],
+    person_id: Optional[int],
+    db,
+    camera_id: str,
+    zone: str
+) -> Optional[str]:
+    """
+    Classify action from pose landmarks and update tracking.
+
+    Returns the action type string or None.
+    """
+    if not pose_landmarks:
+        return None
+
+    try:
+        action, confidence = ActionService.classify_action(pose_landmarks, person_id)
+
+        if action == ActionType.UNKNOWN or confidence < 0.5:
+            return None
+
+        # Update action tracking if we have a person
+        if person_id is not None:
+            ActionService.update_person_action(
+                db=db,
+                person_id=person_id,
+                action=action,
+                confidence=confidence,
+                camera_id=camera_id,
+                zone=zone
+            )
+
+        return action.value
+
+    except Exception as e:
+        logger.debug(f"Action classification error: {e}")
         return None
 
 
@@ -793,6 +873,12 @@ def cleanup_stale_caches():
         for key in list(_active_tracks.keys())[:excess]:
             del _active_tracks[key]
             cleaned += 1
+
+    # Clean up old anomaly alert cooldowns
+    AnomalyService.cleanup_old_alerts()
+
+    # Clean up stale action tracking data
+    ActionService.cleanup_stale_tracking()
 
     _last_cleanup_time = now
 
@@ -954,11 +1040,52 @@ class ReIDWorker:
             await broadcast_occupancy(total, by_camera)
             self._last_occupancy_broadcast = total
 
+            # Check crowd density per zone
+            by_zone: Dict[str, int] = {}
+            for camera_id, count in by_camera.items():
+                zone = CAMERA_ZONES.get(camera_id, camera_id)
+                by_zone[zone] = by_zone.get(zone, 0) + count
+
+            for zone, count in by_zone.items():
+                anomaly = AnomalyService.check_crowd_density(zone, count)
+                if anomaly:
+                    await self._broadcast_anomaly(anomaly)
+
             logger.debug(f"[BROADCAST] Occupancy update: total={total}, by_camera={by_camera}")
         except ImportError:
             pass  # WebSocket manager not available
         except Exception as e:
             logger.debug(f"[BROADCAST] Error broadcasting occupancy: {e}")
+
+    async def _broadcast_anomaly(self, anomaly: Dict):
+        """Broadcast anomaly alert to WebSocket clients."""
+        try:
+            from websocket_manager import ws_manager
+            await ws_manager.broadcast("anomaly:alert", anomaly)
+            logger.warning(f"ANOMALY: {anomaly.get('message', 'Unknown anomaly')}")
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.debug(f"[BROADCAST] Error broadcasting anomaly: {e}")
+
+    async def _broadcast_action_update(
+        self, person_id: int, display_id: str, action: str, zone: str, camera_id: str
+    ):
+        """Broadcast action update to WebSocket clients."""
+        try:
+            from websocket_manager import ws_manager
+            await ws_manager.broadcast("action:update", {
+                "person_id": person_id,
+                "display_id": display_id,
+                "action": action,
+                "zone": zone,
+                "camera_id": camera_id,
+                "timestamp": datetime.utcnow().isoformat()
+            })
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.debug(f"[BROADCAST] Error broadcasting action update: {e}")
 
     async def _process_message(self, message):
         """Process an MQTT message."""
@@ -1064,8 +1191,8 @@ class ReIDWorker:
         # Rotate thumbnail if camera is mounted sideways (e.g., cam_040)
         thumbnail = self._rotate_thumbnail_if_needed(thumbnail, camera_id)
 
-        # Detect pose (sampled, non-blocking)
-        pose_state = detect_pose_from_thumbnail(thumbnail_bytes_for_pose)
+        # Detect pose and get landmarks (sampled, non-blocking)
+        pose_state, pose_landmarks = detect_pose_from_thumbnail(thumbnail_bytes_for_pose)
 
         # Extract embedding
         embedding = await self.reid_service.extract_features(thumbnail)
@@ -1134,6 +1261,29 @@ class ReIDWorker:
                     )
                     db.add(sighting)
 
+                    # Classify action from pose landmarks
+                    action_type = classify_action_from_landmarks(
+                        pose_landmarks, person_id, db, camera_id, zone_name
+                    )
+
+                    # Broadcast action update via WebSocket if action detected
+                    if action_type:
+                        await self._broadcast_action_update(
+                            person_id, person.display_id, action_type, zone_name, camera_id
+                        )
+
+                    # Check for restricted area access
+                    is_staff = person.staff_id is not None
+                    anomaly = AnomalyService.check_restricted_area(
+                        person_id=person_id,
+                        display_id=person.display_id,
+                        zone=zone_name,
+                        camera_id=camera_id,
+                        is_staff=is_staff
+                    )
+                    if anomaly:
+                        await self._broadcast_anomaly(anomaly)
+
                     # Write detection to InfluxDB for traffic analytics
                     try:
                         write_api = InfluxDBConnection.get_write_api()
@@ -1144,6 +1294,7 @@ class ReIDWorker:
                             .tag("classification", classification) \
                             .tag("track_id", person.display_id) \
                             .tag("pose", pose_state or "unknown") \
+                            .tag("action", action_type or "unknown") \
                             .field("confidence", float(data.get("score", 1.0)))
                         write_api.write(bucket=INFLUXDB_BUCKET, org=INFLUXDB_ORG, record=point)
                     except Exception as e:
@@ -1180,6 +1331,18 @@ class ReIDWorker:
                         _active_tracks[frigate_id] = person.id
                         _person_last_camera[person.id] = (camera_id, datetime.utcnow())
                         logger.info(f"Created new person {person.display_id} from {frigate_id} (entry camera)")
+
+                        # Classify action for new person
+                        new_zone_name = CAMERA_ZONES.get(camera_id, camera_id)
+                        action_type = classify_action_from_landmarks(
+                            pose_landmarks, person.id, db, camera_id, new_zone_name
+                        )
+
+                        # Broadcast action update via WebSocket if action detected
+                        if action_type:
+                            await self._broadcast_action_update(
+                                person.id, person.display_id, action_type, new_zone_name, camera_id
+                            )
 
                         # Publish enriched event
                         await self._publish_enriched_event(
@@ -1253,11 +1416,36 @@ class ReIDWorker:
                 except Exception as e:
                     logger.warning(f"Failed to write dwell time to InfluxDB: {e}")
 
+                # Check for loitering anomaly
+                person = db.query(TrackedPerson).filter(TrackedPerson.id == person_id).first()
+                if person and zone_name:
+                    is_staff = person.staff_id is not None
+                    anomaly = AnomalyService.check_loitering(
+                        person_id=person_id,
+                        display_id=person.display_id,
+                        zone=zone_name,
+                        dwell_seconds=dwell_seconds,
+                        is_staff=is_staff
+                    )
+                    if anomaly:
+                        await self._broadcast_anomaly(anomaly)
+
             # Check if person is still visible on any camera
             if person_id not in _active_tracks.values():
                 person = db.query(TrackedPerson).filter(TrackedPerson.id == person_id).first()
                 if person:
                     person.is_active = False
+
+                    # Check for rapid exit anomaly
+                    if person.first_seen:
+                        total_duration = (datetime.utcnow() - person.first_seen).total_seconds()
+                        anomaly = AnomalyService.check_rapid_exit(
+                            person_id=person_id,
+                            display_id=person.display_id,
+                            total_duration_seconds=total_duration
+                        )
+                        if anomaly:
+                            await self._broadcast_anomaly(anomaly)
 
             db.commit()
             logger.info(f"Person {person_id} left camera {camera_id} (dwell: {dwell_seconds}s)")
@@ -1551,6 +1739,28 @@ class ReIDWorker:
         # Store color histogram for this person
         if color_hist is not None:
             _person_color_histograms[person.id] = color_hist
+
+        # Check for returning customer on entry cameras
+        if camera_id in ENTRY_CAMERAS and person.person_type != "staff":
+            try:
+                profile, is_returning = CustomerInsightsService.find_or_create_profile(
+                    db, person, embedding
+                )
+                if is_returning:
+                    # Broadcast via WebSocket
+                    from websocket_manager import ws_manager
+                    asyncio.create_task(
+                        ws_manager.broadcast("customer:returning", {
+                            "profile_id": profile.profile_id,
+                            "visit_number": profile.total_visits,
+                            "loyalty_tier": profile.loyalty_tier,
+                            "person_display_id": person.display_id,
+                            "timestamp": datetime.utcnow().isoformat()
+                        })
+                    )
+                    logger.info(f"Welcome back! Customer {profile.profile_id} - Visit #{profile.total_visits}")
+            except Exception as e:
+                logger.warning(f"Failed to check returning customer: {e}")
 
         return person
 

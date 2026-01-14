@@ -497,6 +497,193 @@ export interface PoseStats {
 export const getPoseStats = () =>
   api.get<PoseStats>('/analytics/pose/stats')
 
+// Action Recognition types
+export interface ActionData {
+  count: number
+  total_minutes: number
+  avg_duration_seconds: number
+  percentage?: number
+}
+
+export interface ActionStats {
+  period_hours: number
+  actions: Record<string, ActionData>
+}
+
+export interface ZoneActions {
+  [zone: string]: {
+    [action: string]: {
+      count: number
+      total_minutes: number
+    }
+  }
+}
+
+export interface ActionSummary {
+  period_hours: number
+  stats: ActionStats
+  zone_breakdown: ZoneActions
+  current_actions: Record<string, { action: string; since: string }>
+  insights: {
+    total_actions: number
+    activity_level: string
+    activity_ratio: number
+    sitting_percentage: number
+    standing_percentage: number
+    walking_percentage: number
+  }
+}
+
+export interface PersonAction {
+  id: number
+  action: string
+  zone: string | null
+  camera_id: string | null
+  confidence: number
+  started_at: string
+  ended_at: string | null
+  duration_seconds: number | null
+}
+
+export interface ActionType {
+  type: string
+  name: string
+}
+
+// Action Recognition endpoints
+export const getActionTypes = () =>
+  api.get<ActionType[]>('/actions/types')
+
+export const getActionStats = (hours = 24) =>
+  api.get<ActionStats>('/actions/stats', { params: { hours } })
+
+export const getActionsByZone = (hours = 24) =>
+  api.get<ZoneActions>('/actions/by-zone', { params: { hours } })
+
+export const getPersonActions = (personId: number, hours = 24) =>
+  api.get<PersonAction[]>(`/actions/person/${personId}`, { params: { hours } })
+
+export const getCurrentActions = () =>
+  api.get<Record<string, { action: string; since: string }>>('/actions/current')
+
+export const getActionSummary = (hours = 24) =>
+  api.get<ActionSummary>('/actions/summary', { params: { hours } })
+
+// Staff Analytics types
+export interface StaffMemberSummary {
+  person_id: number
+  display_id: string
+  staff_name: string | null
+  staff_id: number | null
+  first_seen: string | null
+  last_seen: string | null
+  total_time_minutes: number
+  zones_visited: string[]
+  zone_count: number
+  action_breakdown: Record<string, number>
+  sighting_count: number
+}
+
+export interface StaffSummary {
+  period_hours: number
+  total_staff_detected: number
+  staff: StaffMemberSummary[]
+}
+
+export interface CoverageGap {
+  zone: string
+  hour: number
+  severity: 'high' | 'medium'
+}
+
+export interface StaffCoverage {
+  period_hours: number
+  coverage_by_zone: Record<string, Record<number, number>>
+  zone_scores: Record<string, number>
+  coverage_gaps: CoverageGap[]
+  overall_score: number
+}
+
+export interface StaffEfficiency {
+  person_id: number
+  display_id: string
+  staff_name: string | null
+  staff_id: number | null
+  total_time_minutes: number
+  active_time_minutes: number
+  idle_time_minutes: number
+  activity_rate: number
+  zone_transitions: number
+  mobility_score: number
+  efficiency_score: number
+}
+
+export interface ZoneServiceTime {
+  avg_dwell_seconds: number | null
+  avg_dwell_minutes: number | null
+  sample_size: number
+  staff_present_count: number
+}
+
+export interface ServiceTimes {
+  period_hours: number
+  service_zones: Record<string, ZoneServiceTime>
+}
+
+export interface ShiftData {
+  total_staff_hours: number
+  avg_hours_per_day: number
+  zones_covered: string[]
+  coverage_count: number
+  sighting_count: number
+}
+
+export interface ShiftComparison {
+  period_days: number
+  shifts: Record<string, ShiftData>
+}
+
+export interface StaffPosition {
+  person_id: number
+  display_id: string
+  staff_name: string | null
+  staff_id: number | null
+  current_zone: string | null
+  current_camera: string | null
+  current_action: string | null
+  last_seen: string | null
+}
+
+export interface StaffDashboard {
+  summary: StaffSummary
+  coverage: StaffCoverage
+  efficiency: StaffEfficiency[]
+  positions: StaffPosition[]
+  service_times: ServiceTimes
+}
+
+// Staff Analytics endpoints
+export const getStaffSummary = (hours = 24) =>
+  api.get<StaffSummary>('/staff-analytics/summary', { params: { hours } })
+
+export const getStaffCoverage = (hours = 8) =>
+  api.get<StaffCoverage>('/staff-analytics/coverage', { params: { hours } })
+
+export const getStaffEfficiency = (hours = 24) =>
+  api.get<StaffEfficiency[]>('/staff-analytics/efficiency', { params: { hours } })
+
+export const getStaffServiceTimes = (hours = 24) =>
+  api.get<ServiceTimes>('/staff-analytics/service-times', { params: { hours } })
+
+export const getStaffShiftComparison = (days = 7) =>
+  api.get<ShiftComparison>('/staff-analytics/shifts', { params: { days } })
+
+export const getStaffPositions = () =>
+  api.get<StaffPosition[]>('/staff-analytics/positions')
+
+export const getStaffDashboard = () =>
+  api.get<StaffDashboard>('/staff-analytics/dashboard')
+
 // Search types
 export interface SearchResult {
   id: string
@@ -2153,5 +2340,115 @@ export const getCameraDetectionStats = (cameraId: string) =>
 
 export const getCameraGroups = () =>
   api.get<Record<string, string[]>>('/detection/camera-groups')
+
+// Customer Insights types
+export type LoyaltyTier = 'new' | 'occasional' | 'regular' | 'vip'
+
+export interface CustomerProfile {
+  profile_id: string
+  total_visits: number
+  loyalty_tier: LoyaltyTier
+  loyalty_points: number
+  first_visit: string | null
+  last_visit: string | null
+  avg_dwell_minutes: number | null
+  favorite_zone: string | null
+  days_since_last_visit: number | null
+}
+
+export interface TierDistribution {
+  new: number
+  occasional: number
+  regular: number
+  vip: number
+}
+
+export interface InsightsSummary {
+  total_customers: number
+  tier_distribution: TierDistribution
+  recent_visitors_7d: number
+  returning_rate_7d: number
+  avg_visits_per_customer: number
+  avg_dwell_minutes: number
+  vip_count: number
+  regular_count: number
+}
+
+export interface FrequencyDistribution {
+  once: number
+  '2-3_times': number
+  '4-7_times': number
+  '8+_times': number
+}
+
+export interface VisitFrequency {
+  period_days: number
+  frequency_distribution: FrequencyDistribution
+  total_active_customers: number
+}
+
+export interface RetentionPeriod {
+  total_visitors: number
+  returning_visitors: number
+  new_visitors: number
+  retention_rate: number
+}
+
+export interface RetentionAnalysis {
+  '7d': RetentionPeriod
+  '30d': RetentionPeriod
+  '90d': RetentionPeriod
+}
+
+export interface ChurnRiskCustomer {
+  profile_id: string
+  loyalty_tier: LoyaltyTier
+  total_visits: number
+  last_visit: string | null
+  days_since_visit: number | null
+  loyalty_points: number
+}
+
+export interface CustomerJourneyPatterns {
+  profile_id: string
+  total_visits: number
+  zone_time_minutes: Record<string, number>
+  preferred_time: 'morning' | 'afternoon' | 'evening' | 'unknown'
+  favorite_zone: string | null
+  loyalty_tier: LoyaltyTier
+  loyalty_points: number
+  first_visit: string | null
+  last_visit: string | null
+}
+
+export interface InsightsDashboard {
+  summary: InsightsSummary
+  top_customers: CustomerProfile[]
+  retention: RetentionAnalysis
+  churn_risk: ChurnRiskCustomer[]
+  frequency: VisitFrequency
+}
+
+// Customer Insights endpoints
+export const getInsightsSummary = () =>
+  api.get<InsightsSummary>('/insights/summary')
+
+export const getTopCustomers = (limit = 20) =>
+  api.get<CustomerProfile[]>('/insights/top-customers', { params: { limit } })
+
+export const getVisitFrequency = (days = 30) =>
+  api.get<VisitFrequency>('/insights/frequency', { params: { days } })
+
+export const getRetentionAnalysis = () =>
+  api.get<RetentionAnalysis>('/insights/retention')
+
+export const getChurnRisk = (days = 30) =>
+  api.get<ChurnRiskCustomer[]>('/insights/churn-risk', { params: { days } })
+
+export const getCustomerDetails = (profileId: string) =>
+  api.get<CustomerJourneyPatterns>(`/insights/customer/${profileId}`)
+
+export const getInsightsDashboard = () =>
+  api.get<InsightsDashboard>('/insights/dashboard')
 
 export default api

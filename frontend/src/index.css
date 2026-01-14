@@ -96,3 +96,159 @@ body {
 .flow-arrows:not(.editing) line[stroke="#6366F1"] {
   animation: flow-pulse 3s ease-in-out infinite;
 }
+
+/* ============================================
+   Mobile Responsive Utilities
+   ============================================ */
+
+/* Hide scrollbar but allow scroll */
+.hide-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.hide-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+/* Safe area padding for notched phones */
+.safe-bottom {
+  padding-bottom: env(safe-area-inset-bottom, 20px);
+}
+
+/* Prevent text selection on interactive elements */
+.no-select {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* Floor plan touch improvements */
+.floor-plan-mobile {
+  touch-action: pan-x pan-y pinch-zoom;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Prevent pull-to-refresh on floor plan */
+.floor-plan-container {
+  overscroll-behavior: contain;
+}
+
+/* Larger touch targets for camera markers on mobile */
+@media (max-width: 768px) {
+  .camera-marker circle {
+    r: 8 !important;
+  }
+
+  .camera-marker text {
+    font-size: 10px !important;
+  }
+
+  .journey-path circle {
+    r: 10 !important;
+  }
+}
+
+/* Mobile bottom sheet for panels */
+.mobile-sheet {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background-color: #111827;
+  border-top-left-radius: 1rem;
+  border-top-right-radius: 1rem;
+  transform: translateY(0);
+  transition: transform 0.3s ease-out;
+  max-height: 70vh;
+  overflow-y: auto;
+  z-index: 50;
+}
+
+.mobile-sheet.hidden {
+  transform: translateY(100%);
+}
+
+.mobile-sheet-handle {
+  width: 3rem;
+  height: 0.25rem;
+  background-color: #4b5563;
+  border-radius: 9999px;
+  margin: 0.75rem auto;
+}
+
+/* Collapsible card animations */
+.collapsible-content {
+  overflow: hidden;
+  transition: max-height 0.3s ease-out, opacity 0.3s ease-out;
+}
+
+.collapsible-content.collapsed {
+  max-height: 0;
+  opacity: 0;
+}
+
+.collapsible-content.expanded {
+  max-height: 2000px;
+  opacity: 1;
+}
+
+/* Touch-friendly minimum tap target size (44px) */
+.tap-target {
+  min-height: 44px;
+  min-width: 44px;
+}
+
+/* Mobile navigation bottom bar */
+.mobile-nav-bar {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background-color: #111827;
+  border-top: 1px solid #1f2937;
+  z-index: 40;
+  padding-bottom: env(safe-area-inset-bottom, 0);
+}
+
+/* Hamburger menu animation */
+.hamburger-line {
+  display: block;
+  height: 2px;
+  background-color: white;
+  transition: transform 0.3s ease, opacity 0.3s ease;
+}
+
+/* Responsive card with consistent padding */
+.card-responsive {
+  background-color: #1f2937;
+  border-radius: 0.5rem;
+  padding: 0.75rem;
+}
+
+@media (min-width: 768px) {
+  .card-responsive {
+    padding: 1rem;
+  }
+}
+
+@media (min-width: 1024px) {
+  .card-responsive {
+    padding: 1.5rem;
+  }
+}
+
+/* Responsive table scroll container */
+.table-responsive {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+@media (max-width: 768px) {
+  .table-responsive {
+    margin-left: -0.75rem;
+    margin-right: -0.75rem;
+    padding-left: 0.75rem;
+    padding-right: 0.75rem;
+  }
+}

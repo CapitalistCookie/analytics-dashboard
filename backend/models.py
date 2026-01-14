@@ -377,3 +377,52 @@ class NegativePair(Base):
     person_a = relationship("TrackedPerson", foreign_keys=[person_id_a], backref="negative_pairs_as_a")
     person_b = relationship("TrackedPerson", foreign_keys=[person_id_b], backref="negative_pairs_as_b")
     creator = relationship("User", backref="created_negative_pairs")
+
+
+class PersonAction(Base):
+    """Tracked action for a person (sitting, standing, walking, etc.)."""
+    __tablename__ = "person_actions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    person_id = Column(Integer, ForeignKey("tracked_persons.id", ondelete="CASCADE"), nullable=False, index=True)
+    action = Column(String(50), nullable=False, index=True)  # sitting, standing, walking, bending, reaching
+    confidence = Column(Float, default=1.0)
+    camera_id = Column(String(50), nullable=True)
+    zone = Column(String(100), nullable=True)
+    started_at = Column(DateTime, default=datetime.utcnow, index=True)
+    ended_at = Column(DateTime, nullable=True)
+    duration_seconds = Column(Float, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    person = relationship("TrackedPerson", backref="actions")
+
+
+class CustomerProfile(Base):
+    """Customer profile for return visitor tracking and loyalty insights."""
+    __tablename__ = "customer_profiles"
+
+    id = Column(Integer, primary_key=True, index=True)
+    profile_id = Column(String(20), unique=True, nullable=False, index=True)  # e.g., "C-00001"
+
+    # Embedding for matching (average of best embeddings)
+    representative_embedding = Column(LargeBinary, nullable=True)
+
+    # Visit tracking
+    first_visit = Column(DateTime, default=datetime.utcnow)
+    last_visit = Column(DateTime, default=datetime.utcnow)
+    total_visits = Column(Integer, default=1)
+
+    # Aggregated stats
+    avg_dwell_minutes = Column(Float, default=0.0)
+    total_spend_minutes = Column(Float, default=0.0)
+    favorite_zone = Column(String(100), nullable=True)
+
+    # Loyalty
+    loyalty_tier = Column(String(20), default="new", index=True)  # new, occasional, regular, vip
+    loyalty_points = Column(Integer, default=0)
+
+    # Linked tracked persons (JSON array of person_ids)
+    linked_person_ids = Column(String(2000), default="[]")
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

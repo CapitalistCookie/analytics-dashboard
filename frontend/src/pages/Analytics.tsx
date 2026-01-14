@@ -26,6 +26,13 @@ import {
 } from '../api/client'
 import ZoneHeatMap from '../components/ZoneHeatMap'
 import PoseStatsWidget from '../components/PoseStatsWidget'
+import FlowAnalytics from '../components/FlowAnalytics'
+import ActionAnalytics from '../components/ActionAnalytics'
+import StaffAnalytics from '../components/StaffAnalytics'
+import CustomerInsights from '../components/CustomerInsights'
+
+// View tabs
+type AnalyticsView = 'traffic' | 'flow' | 'actions' | 'staff' | 'customers'
 
 const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#06b6d4', '#84cc16']
 const HEATMAP_COLORS = ['#1f2937', '#1e3a5f', '#1d4ed8', '#2563eb', '#3b82f6', '#60a5fa', '#93c5fd']
@@ -70,6 +77,7 @@ export default function Analytics() {
   const [selectedDate] = useState<string>(formatDate(new Date()))
   const [loading, setLoading] = useState(true)
   const [exporting, setExporting] = useState(false)
+  const [activeView, setActiveView] = useState<AnalyticsView>('traffic')
 
   // Data states
   const [hourlyTraffic, setHourlyTraffic] = useState<HourlyCount[]>([])
@@ -193,49 +201,116 @@ export default function Analytics() {
 
   return (
     <div className="space-y-4 md:space-y-6">
-      {/* Header with date selector and export */}
+      {/* Header with view tabs */}
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <div>
           <h2 className="text-xl md:text-2xl font-bold text-white">Analytics</h2>
-          <p className="text-gray-400 text-xs md:text-sm mt-1">
-            Real-time insights from InfluxDB ({summary?.total_detections?.toLocaleString() || 0} detections)
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          {/* Date preset buttons */}
-          <div className="flex bg-gray-800 rounded-lg p-1">
-            {(['today', 'yesterday', 'last7', 'last30'] as DatePreset[]).map((preset) => (
-              <button
-                key={preset}
-                onClick={() => setDatePreset(preset)}
-                className={`px-2 md:px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
-                  datePreset === preset
-                    ? 'bg-blue-600 text-white'
-                    : 'text-gray-400 hover:text-white'
-                }`}
-              >
-                {presetLabels[preset]}
-              </button>
-            ))}
+          {/* View tabs */}
+          <div className="flex bg-gray-700 rounded-lg p-1 mt-2">
+            <button
+              onClick={() => setActiveView('traffic')}
+              className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
+                activeView === 'traffic'
+                  ? 'bg-blue-600 text-white'
+                  : 'text-gray-400 hover:text-white'
+              }`}
+            >
+              Traffic Analytics
+            </button>
+            <button
+              onClick={() => setActiveView('flow')}
+              className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
+                activeView === 'flow'
+                  ? 'bg-blue-600 text-white'
+                  : 'text-gray-400 hover:text-white'
+              }`}
+            >
+              Flow Analysis
+            </button>
+            <button
+              onClick={() => setActiveView('actions')}
+              className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
+                activeView === 'actions'
+                  ? 'bg-blue-600 text-white'
+                  : 'text-gray-400 hover:text-white'
+              }`}
+            >
+              Actions
+            </button>
+            <button
+              onClick={() => setActiveView('staff')}
+              className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
+                activeView === 'staff'
+                  ? 'bg-blue-600 text-white'
+                  : 'text-gray-400 hover:text-white'
+              }`}
+            >
+              Staff
+            </button>
+            <button
+              onClick={() => setActiveView('customers')}
+              className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
+                activeView === 'customers'
+                  ? 'bg-blue-600 text-white'
+                  : 'text-gray-400 hover:text-white'
+              }`}
+            >
+              Customers
+            </button>
           </div>
-
-          {/* Export button */}
-          <button
-            onClick={handleExport}
-            disabled={exporting}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600 hover:bg-green-700 disabled:bg-gray-600 text-white rounded-lg text-xs font-medium transition-colors"
-          >
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-            </svg>
-            {exporting ? 'Exporting...' : 'Export CSV'}
-          </button>
         </div>
+        {activeView === 'traffic' && (
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Date preset buttons */}
+            <div className="flex bg-gray-800 rounded-lg p-1">
+              {(['today', 'yesterday', 'last7', 'last30'] as DatePreset[]).map((preset) => (
+                <button
+                  key={preset}
+                  onClick={() => setDatePreset(preset)}
+                  className={`px-2 md:px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                    datePreset === preset
+                      ? 'bg-blue-600 text-white'
+                      : 'text-gray-400 hover:text-white'
+                  }`}
+                >
+                  {presetLabels[preset]}
+                </button>
+              ))}
+            </div>
+
+            {/* Export button */}
+            <button
+              onClick={handleExport}
+              disabled={exporting}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600 hover:bg-green-700 disabled:bg-gray-600 text-white rounded-lg text-xs font-medium transition-colors"
+            >
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+              </svg>
+              {exporting ? 'Exporting...' : 'Export CSV'}
+            </button>
+          </div>
+        )}
       </div>
 
-      {/* Summary Cards */}
-      {summary && (
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 md:gap-4">
+      {/* Flow Analysis View */}
+      {activeView === 'flow' && <FlowAnalytics />}
+
+      {/* Action Analytics View */}
+      {activeView === 'actions' && <ActionAnalytics />}
+
+      {/* Staff Analytics View */}
+      {activeView === 'staff' && <StaffAnalytics />}
+
+      {/* Customer Insights View */}
+      {activeView === 'customers' && <CustomerInsights />}
+
+      {/* Traffic Analytics View */}
+      {activeView === 'traffic' && (
+        <>
+          {/* Summary Cards */}
+          {summary && (
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 md:gap-4">
           <SummaryCard
             label="Total Detections"
             value={summary.total_detections.toLocaleString()}
@@ -478,6 +553,8 @@ export default function Analytics() {
           <PoseStatsWidget refreshInterval={10000} />
         </div>
       </div>
+        </>
+      )}
     </div>
   )
 }

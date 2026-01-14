@@ -32,9 +32,21 @@ interface QueueUpdateData {
   timestamp: string
 }
 
+export interface AnomalyAlertData {
+  type: string
+  severity: 'low' | 'medium' | 'high' | 'critical'
+  message: string
+  timestamp: string
+  person_id?: number
+  display_id?: string
+  zone?: string
+  camera_id?: string
+  details?: Record<string, unknown>
+}
+
 interface WebSocketMessage {
   type: string
-  data: OccupancyData | CameraStatusData | QueueUpdateData
+  data: OccupancyData | CameraStatusData | QueueUpdateData | AnomalyAlertData
   timestamp: string
 }
 
@@ -44,15 +56,18 @@ interface UseDashboardWebSocketOptions {
   onOccupancyUpdate?: (data: OccupancyData) => void
   onCameraStatus?: (data: CameraStatusData) => void
   onQueueUpdate?: (data: QueueUpdateData) => void
+  onAnomalyAlert?: (data: AnomalyAlertData) => void
 }
 
 interface UseDashboardWebSocketReturn {
   occupancy: OccupancyData | null
+  anomalies: AnomalyAlertData[]
   isConnected: boolean
   needsPolling: boolean
   connectionCount: number
   lastUpdate: Date | null
   reconnect: () => void
+  clearAnomalies: () => void
 }
 
 export function useDashboardWebSocket({
@@ -61,8 +76,10 @@ export function useDashboardWebSocket({
   onOccupancyUpdate,
   onCameraStatus,
   onQueueUpdate,
+  onAnomalyAlert,
 }: UseDashboardWebSocketOptions = {}): UseDashboardWebSocketReturn {
   const [occupancy, setOccupancy] = useState<OccupancyData | null>(null)
+  const [anomalies, setAnomalies] = useState<AnomalyAlertData[]>([])
   const [isConnected, setIsConnected] = useState(false)
   const [connectionCount, setConnectionCount] = useState(0)
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null)
@@ -70,6 +87,10 @@ export function useDashboardWebSocket({
   const wsRef = useRef<WebSocket | null>(null)
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  const clearAnomalies = useCallback(() => {
+    setAnomalies([])
+  }, [])
 
   const connect = useCallback(() => {
     if (!enabled) return
@@ -147,6 +168,20 @@ export function useDashboardWebSocket({
               onQueueUpdate?.(data)
               break
             }
+            case 'anomaly:alert': {
+              const data = message.data as AnomalyAlertData
+              setAnomalies(prev => [data, ...prev].slice(0, 50))
+              onAnomalyAlert?.(data)
+              // Play sound for high/critical severity
+              if (['high', 'critical'].includes(data.severity)) {
+                const audio = new Audio('/alert.mp3')
+                audio.volume = 0.5
+                audio.play().catch(() => {
+                  // Ignore autoplay errors
+                })
+              }
+              break
+            }
             default:
               console.log('[WebSocket] Unknown message type:', message.type)
           }
@@ -160,7 +195,7 @@ export function useDashboardWebSocket({
       console.error('[WebSocket] Failed to connect:', e)
       setIsConnected(false)
     }
-  }, [enabled, reconnectInterval, onOccupancyUpdate, onCameraStatus, onQueueUpdate])
+  }, [enabled, reconnectInterval, onOccupancyUpdate, onCameraStatus, onQueueUpdate, onAnomalyAlert])
 
   const reconnect = useCallback(() => {
     if (reconnectTimeoutRef.current) {
@@ -191,11 +226,13 @@ export function useDashboardWebSocket({
 
   return {
     occupancy,
+    anomalies,
     isConnected,
     needsPolling: !isConnected,
     connectionCount,
     lastUpdate,
     reconnect,
+    clearAnomalies,
   }
 }
 

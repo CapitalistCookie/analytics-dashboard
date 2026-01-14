@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 from pydantic import BaseModel
 from database import get_db, init_db, InfluxDBConnection, INFLUXDB_BUCKET, INFLUXDB_ORG
-from routers import staff, analytics, search, alerts, auth, profile, admin, settings, reports, shifts, scorecards, zones, cameras, incidents, notes, activity, reid, detection_config
+from routers import staff, analytics, search, alerts, auth, profile, admin, settings, reports, shifts, scorecards, zones, cameras, incidents, notes, activity, reid, detection_config, anomalies, flow, actions, staff_analytics, insights
 from cache import frigate_cache, cached
 
 # Configure logging for reid_worker to show INFO level
@@ -95,6 +95,11 @@ app.include_router(notes.router)
 app.include_router(activity.router)
 app.include_router(reid.router)
 app.include_router(detection_config.router)
+app.include_router(anomalies.router)
+app.include_router(flow.router)
+app.include_router(actions.router)
+app.include_router(staff_analytics.router)
+app.include_router(insights.router)
 
 # WebSocket for real-time dashboard updates
 from websocket_manager import ws_manager
