@@ -21,3 +21,7 @@ pyyaml>=6.0.0
 opencv-python-headless>=4.8.0
 # Pose estimation
 mediapipe>=0.10.0
+# Rate limiting
+slowapi>=0.1.9
+# Email notifications
+aiosmtplib>=2.0.0

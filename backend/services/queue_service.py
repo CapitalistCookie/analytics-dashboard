@@ -146,6 +146,7 @@ class QueueService:
                     "hour": hour_key,
                     "count": 0,
                     "total_wait": 0,
+                    "max_wait": 0,
                     "completed": 0
                 }
 
@@ -154,6 +155,7 @@ class QueueService:
             if sighting.exit_time:
                 wait = (sighting.exit_time - sighting.enter_time).total_seconds()
                 hourly_data[hour_key]["total_wait"] += wait
+                hourly_data[hour_key]["max_wait"] = max(hourly_data[hour_key]["max_wait"], wait)
                 hourly_data[hour_key]["completed"] += 1
 
         # Calculate averages
@@ -166,6 +168,7 @@ class QueueService:
                 "hour": data["hour"].isoformat(),
                 "queue_count": data["count"],
                 "avg_wait_seconds": round(avg_wait, 1),
+                "max_wait_seconds": round(data["max_wait"], 1),
                 "completed_visits": data["completed"]
             })
 

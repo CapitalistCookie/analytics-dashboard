@@ -7,10 +7,15 @@ from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, Request, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 
 from database import get_db
 from models import User, AuditLog
 from routers.auth import require_admin, get_password_hash
+
+# Rate limiter for admin endpoints (30 requests/minute)
+limiter = Limiter(key_func=get_remote_address)
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -117,6 +122,7 @@ async def list_users(
 
 
 @router.post("/users", response_model=UserResponse, status_code=201)
+@limiter.limit("30/minute")
 async def create_user(
     user_data: UserCreate,
     request: Request,
@@ -169,6 +175,7 @@ async def get_user(
 
 
 @router.put("/users/{user_id}", response_model=UserResponse)
+@limiter.limit("30/minute")
 async def update_user(
     user_id: int,
     update: UserUpdate,
@@ -220,6 +227,7 @@ async def update_user(
 
 
 @router.delete("/users/{user_id}")
+@limiter.limit("30/minute")
 async def delete_user(
     user_id: int,
     request: Request,
@@ -245,6 +253,7 @@ async def delete_user(
 
 
 @router.post("/users/{user_id}/reset-password")
+@limiter.limit("30/minute")
 async def reset_user_password(
     user_id: int,
     password_data: PasswordReset,
@@ -298,6 +307,7 @@ async def get_roles(current_user: User = Depends(require_admin)):
 
 
 @router.put("/users/{user_id}/role")
+@limiter.limit("30/minute")
 async def assign_role(
     user_id: int,
     role: str,

@@ -1,32 +1,28 @@
 """Alerts router for alert configuration and history."""
 
+import asyncio
 import json
+import os
+import logging
 from datetime import datetime, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from database import get_db
 from models import Alert, AlertConfig, AfterHoursSchedule
+from services.notification_service import send_alert_email, send_webhook_notification, is_smtp_configured
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/alerts", tags=["alerts"])
+
+# Default notification email from env
+DEFAULT_ALERT_EMAIL = os.getenv("ALERT_EMAIL", "")
 
 
 # Pydantic models
-# TODO(feature): Implement email notification system
-# - Add SMTP configuration (SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS env vars)
-# - Create async send_email_notification() function in services/notification_service.py
-# - Support HTML templates for alert emails
-# - Implement notification batching for high-frequency alerts
-
-# TODO(feature): Implement webhook notification system
-# - Create async send_webhook_notification() function
-# - Support retry logic with exponential backoff (3 retries)
-# - Log webhook delivery status and response codes
-# - Validate webhook URLs on config creation
-
 class AlertConfigCreate(BaseModel):
     """Create alert configuration."""
     name: str = Field(..., min_length=1, max_length=100)
@@ -37,10 +33,19 @@ class AlertConfigCreate(BaseModel):
     zone_id: Optional[int] = None
     camera_id: Optional[str] = None
     is_enabled: bool = True
-    notify_email: bool = False  # TODO: Wire up to notification_service.send_email_notification()
-    notify_webhook: bool = False  # TODO: Wire up to notification_service.send_webhook_notification()
+    notify_email: bool = False
+    notify_webhook: bool = False
     webhook_url: Optional[str] = None
     cooldown_minutes: int = Field(default=15, ge=1, le=1440)
+
+    @field_validator("webhook_url")
+    @classmethod
+    def validate_webhook_url(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or v == "":
+            return None
+        if not v.startswith(("http://", "https://")):
+            raise ValueError("webhook_url must start with http:// or https://")
+        return v
 
 
 class AlertConfigUpdate(BaseModel):
@@ -56,6 +61,15 @@ class AlertConfigUpdate(BaseModel):
     notify_webhook: Optional[bool] = None
     webhook_url: Optional[str] = None
     cooldown_minutes: Optional[int] = Field(None, ge=1, le=1440)
+
+    @field_validator("webhook_url")
+    @classmethod
+    def validate_webhook_url(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or v == "":
+            return None
+        if not v.startswith(("http://", "https://")):
+            raise ValueError("webhook_url must start with http:// or https://")
+        return v
 
 
 class AlertConfigResponse(BaseModel):
@@ -134,6 +148,92 @@ class AlertCreate(BaseModel):
     details: Optional[dict] = None
     camera_id: Optional[str] = None
     zone_id: Optional[int] = None
+
+
+# ============== Helper Functions ==============
+
+async def trigger_alert_from_config(
+    config: AlertConfig,
+    message: str,
+    details: Optional[dict] = None,
+    db: Session = None
+) -> Alert:
+    """
+    Trigger an alert based on a configuration.
+
+    Handles email and webhook notifications if configured.
+    """
+    # Create the alert record
+    db_alert = Alert(
+        config_id=config.id,
+        alert_type=config.alert_type,
+        severity=config.severity,
+        message=message,
+        details=json.dumps(details) if details else None,
+        camera_id=config.camera_id,
+        zone_id=config.zone_id
+    )
+
+    if db:
+        db.add(db_alert)
+        db.commit()
+        db.refresh(db_alert)
+
+    # Send email notification if enabled
+    if config.notify_email and DEFAULT_ALERT_EMAIL:
+        try:
+            asyncio.create_task(_send_alert_email_safe(
+                to=DEFAULT_ALERT_EMAIL,
+                alert_type=config.alert_type,
+                alert_name=config.name,
+                message=message,
+                severity=config.severity,
+                details=details
+            ))
+        except RuntimeError:
+            logger.debug("No event loop for email notification")
+
+    # Send webhook notification if enabled
+    if config.notify_webhook and config.webhook_url:
+        try:
+            webhook_payload = {
+                "alert_type": config.alert_type,
+                "alert_name": config.name,
+                "severity": config.severity,
+                "message": message,
+                "details": details,
+                "camera_id": config.camera_id,
+                "zone_id": config.zone_id,
+                "timestamp": datetime.utcnow().isoformat(),
+            }
+            asyncio.create_task(_send_webhook_safe(config.webhook_url, webhook_payload))
+        except RuntimeError:
+            logger.debug("No event loop for webhook notification")
+
+    return db_alert
+
+
+async def _send_alert_email_safe(
+    to: str,
+    alert_type: str,
+    alert_name: str,
+    message: str,
+    severity: str,
+    details: Optional[dict]
+):
+    """Safely send alert email with error logging."""
+    try:
+        await send_alert_email(to, alert_type, alert_name, message, severity, details)
+    except Exception as e:
+        logger.error(f"Failed to send alert email: {e}")
+
+
+async def _send_webhook_safe(url: str, payload: dict):
+    """Safely send webhook notification with error logging."""
+    try:
+        await send_webhook_notification(url, payload)
+    except Exception as e:
+        logger.error(f"Failed to send webhook notification: {e}")
 
 
 # ============== Alert Configurations ==============
@@ -465,4 +565,14 @@ async def get_alert_stats(
         },
         "by_type": by_type,
         "time_range_hours": hours
+    }
+
+
+@router.get("/notifications/status")
+async def get_notification_status():
+    """Check email notification configuration status."""
+    return {
+        "email_configured": is_smtp_configured(),
+        "default_email": DEFAULT_ALERT_EMAIL if DEFAULT_ALERT_EMAIL else None,
+        "smtp_host": os.getenv("SMTP_HOST", "") or None
     }

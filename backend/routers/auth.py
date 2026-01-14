@@ -4,8 +4,13 @@ import os
 from datetime import datetime, timedelta
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+
+# Rate limiter for auth endpoints (10 requests/minute)
+limiter = Limiter(key_func=get_remote_address)
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from pydantic import BaseModel
@@ -194,7 +199,9 @@ async def require_manager_or_admin(
 
 # Endpoints
 @router.post("/login", response_model=Token)
+@limiter.limit("10/minute")
 async def login(
+    request: Request,
     form_data: OAuth2PasswordRequestForm = Depends(),
     db: Session = Depends(get_db)
 ):
@@ -235,7 +242,9 @@ async def login(
 
 
 @router.post("/register", response_model=UserResponse, status_code=201)
+@limiter.limit("10/minute")
 async def register(
+    request: Request,
     user_data: UserCreate,
     db: Session = Depends(get_db)
 ):

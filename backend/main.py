@@ -5,9 +5,14 @@ import logging
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
 import httpx
-from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import JSONResponse
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from pydantic import BaseModel
@@ -26,6 +31,22 @@ logging.getLogger("reid_worker").setLevel(logging.INFO)
 FRIGATE_URL = os.getenv("FRIGATE_URL", "http://localhost:5000")
 ENABLE_REID_WORKER = os.getenv("ENABLE_REID_WORKER", "true").lower() == "true"
 logger = logging.getLogger(__name__)
+
+# Rate limiting configuration
+limiter = Limiter(
+    key_func=get_remote_address,
+    default_limits=["100/minute"],
+    storage_uri="memory://",
+)
+
+def custom_rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded):
+    """Custom handler for rate limit exceeded with Retry-After header."""
+    retry_after = getattr(exc, 'retry_after', 60)
+    return JSONResponse(
+        status_code=429,
+        content={"detail": "Rate limit exceeded. Please try again later."},
+        headers={"Retry-After": str(retry_after)}
+    )
 # Global reference to ReID worker task
 _reid_worker_task = None
 @asynccontextmanager
@@ -69,22 +90,23 @@ app = FastAPI(
 # GZip compression for responses > 500 bytes
 app.add_middleware(GZipMiddleware, minimum_size=500)
 # CORS configuration for frontend
-# TODO(security): Replace allow_origins=["*"] with specific frontend origins
-# - Read allowed origins from environment variable (CORS_ALLOWED_ORIGINS)
-# - Example: ["http://dashboard.jangmojib.com", "http://192.168.1.252:3000"]
-# - This prevents unauthorized cross-origin requests in production
+_default_origins = ["http://192.168.1.252:3000", "http://dashboard.jangmojib.com"]
+_cors_origins_env = os.getenv("CORS_ALLOWED_ORIGINS", "")
+CORS_ALLOWED_ORIGINS = [o.strip() for o in _cors_origins_env.split(",") if o.strip()] or _default_origins
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# TODO(security): Add rate limiting middleware to prevent API abuse
-# - Use slowapi or similar library
-# - Configure per-endpoint limits (e.g., 100 req/min for analytics, 10 req/min for auth)
-# - Return 429 Too Many Requests with Retry-After header
+# Rate limiting middleware
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, custom_rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
+
 # Include routers
 app.include_router(staff.router)
 app.include_router(analytics.router)

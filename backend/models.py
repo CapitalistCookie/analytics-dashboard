@@ -1,7 +1,7 @@
 """SQLAlchemy models for the analytics dashboard."""
 
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, DateTime, Boolean, ForeignKey, Float, LargeBinary
+from sqlalchemy import Column, Integer, String, DateTime, Boolean, ForeignKey, Float, LargeBinary, Text
 from sqlalchemy.orm import relationship
 from database import Base
 
@@ -425,4 +425,14 @@ class CustomerProfile(Base):
     linked_person_ids = Column(String(2000), default="[]")
 
     created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class AnomalyConfig(Base):
+    """Persisted anomaly detection configuration."""
+    __tablename__ = "anomaly_configs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    anomaly_type = Column(String(50), unique=True, nullable=False, index=True)
+    config_json = Column(Text, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

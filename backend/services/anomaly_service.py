@@ -9,12 +9,37 @@ Detects suspicious patterns:
 - Rapid Exit: Person leaves very quickly (potential theft)
 """
 
+import asyncio
+import json
 from datetime import datetime, timedelta
 from typing import Dict, Optional
 from enum import Enum
 import logging
 
+from websocket_manager import ws_manager
+
 logger = logging.getLogger(__name__)
+
+# Flag to track if config has been loaded from DB
+_config_loaded = False
+
+
+def _broadcast_anomaly(anomaly: Dict):
+    """Fire-and-forget broadcast of anomaly alert via WebSocket."""
+    try:
+        asyncio.create_task(_safe_broadcast(anomaly))
+    except RuntimeError:
+        # No event loop running (e.g., during tests)
+        logger.debug("No event loop for anomaly broadcast")
+
+
+async def _safe_broadcast(anomaly: Dict):
+    """Safely broadcast anomaly, logging any errors."""
+    try:
+        await ws_manager.broadcast("anomaly:alert", anomaly)
+        logger.info(f"Broadcast anomaly alert: {anomaly.get('type')} - {anomaly.get('message')}")
+    except Exception as e:
+        logger.error(f"Failed to broadcast anomaly alert: {e}")
 
 
 class AnomalyType(str, Enum):
@@ -124,7 +149,7 @@ class AnomalyService:
         if not AnomalyService._check_cooldown(alert_key, config["cooldown"]):
             return None
 
-        return {
+        anomaly = {
             "type": AnomalyType.LOITERING.value,
             "severity": config["severity"],
             "person_id": person_id,
@@ -137,6 +162,8 @@ class AnomalyService:
             "message": f"Person {display_id} loitering in {zone} for {int(dwell_seconds/60)} minutes",
             "timestamp": datetime.utcnow().isoformat() + "Z",
         }
+        _broadcast_anomaly(anomaly)
+        return anomaly
 
     @staticmethod
     def check_restricted_area(
@@ -161,7 +188,7 @@ class AnomalyService:
         if not AnomalyService._check_cooldown(alert_key, config["cooldown"]):
             return None
 
-        return {
+        anomaly = {
             "type": AnomalyType.RESTRICTED_AREA.value,
             "severity": config["severity"],
             "person_id": person_id,
@@ -171,6 +198,8 @@ class AnomalyService:
             "message": f"Non-staff {display_id} entered restricted area: {zone}",
             "timestamp": datetime.utcnow().isoformat() + "Z",
         }
+        _broadcast_anomaly(anomaly)
+        return anomaly
 
     @staticmethod
     def check_unusual_hours(zone: str, camera_id: str) -> Optional[Dict]:
@@ -191,7 +220,7 @@ class AnomalyService:
         if not AnomalyService._check_cooldown(alert_key, config["cooldown"]):
             return None
 
-        return {
+        anomaly = {
             "type": AnomalyType.UNUSUAL_HOURS.value,
             "severity": config["severity"],
             "zone": zone,
@@ -199,6 +228,8 @@ class AnomalyService:
             "message": f"Activity detected in {zone} during closed hours",
             "timestamp": datetime.utcnow().isoformat() + "Z",
         }
+        _broadcast_anomaly(anomaly)
+        return anomaly
 
     @staticmethod
     def check_crowd_density(zone: str, count: int) -> Optional[Dict]:
@@ -216,7 +247,7 @@ class AnomalyService:
         if not AnomalyService._check_cooldown(alert_key, config["cooldown"]):
             return None
 
-        return {
+        anomaly = {
             "type": AnomalyType.CROWD_DENSITY.value,
             "severity": config["severity"],
             "zone": zone,
@@ -227,6 +258,8 @@ class AnomalyService:
             "message": f"High crowd density in {zone}: {count} people (threshold: {threshold})",
             "timestamp": datetime.utcnow().isoformat() + "Z",
         }
+        _broadcast_anomaly(anomaly)
+        return anomaly
 
     @staticmethod
     def check_rapid_exit(
@@ -246,7 +279,7 @@ class AnomalyService:
         if total_duration_seconds < 5:
             return None
 
-        return {
+        anomaly = {
             "type": AnomalyType.RAPID_EXIT.value,
             "severity": config["severity"],
             "person_id": person_id,
@@ -257,6 +290,8 @@ class AnomalyService:
             "message": f"Person {display_id} exited rapidly after {int(total_duration_seconds)} seconds",
             "timestamp": datetime.utcnow().isoformat() + "Z",
         }
+        _broadcast_anomaly(anomaly)
+        return anomaly
 
     @staticmethod
     def _check_cooldown(alert_key: str, cooldown_seconds: int) -> bool:
@@ -282,14 +317,74 @@ class AnomalyService:
             logger.debug(f"Cleaned up {len(old_keys)} old alert cooldowns")
 
     @staticmethod
+    def load_config_from_db():
+        """Load anomaly configuration from database on startup."""
+        global _config_loaded
+        if _config_loaded:
+            return
+
+        try:
+            from database import SessionLocal
+            from models import AnomalyConfig
+
+            db = SessionLocal()
+            try:
+                configs = db.query(AnomalyConfig).all()
+                for config in configs:
+                    if config.anomaly_type in ANOMALY_CONFIG:
+                        stored = json.loads(config.config_json)
+                        ANOMALY_CONFIG[config.anomaly_type].update(stored)
+                        logger.info(f"Loaded anomaly config from DB: {config.anomaly_type}")
+                _config_loaded = True
+                logger.info(f"Anomaly config loaded from DB ({len(configs)} entries)")
+            finally:
+                db.close()
+        except Exception as e:
+            logger.warning(f"Could not load anomaly config from DB: {e}")
+            _config_loaded = True  # Don't retry on error
+
+    @staticmethod
     def get_config() -> Dict:
         """Get current anomaly configuration."""
+        AnomalyService.load_config_from_db()
         return ANOMALY_CONFIG.copy()
 
     @staticmethod
     def update_config(anomaly_type: str, updates: Dict) -> Dict:
-        """Update configuration for specific anomaly type."""
+        """Update configuration for specific anomaly type and persist to DB."""
         if anomaly_type not in ANOMALY_CONFIG:
             raise ValueError(f"Unknown anomaly type: {anomaly_type}")
+
+        # Update in-memory config
         ANOMALY_CONFIG[anomaly_type].update(updates)
+
+        # Persist to database
+        try:
+            from database import SessionLocal
+            from models import AnomalyConfig
+
+            db = SessionLocal()
+            try:
+                # Get or create config record
+                config = db.query(AnomalyConfig).filter(
+                    AnomalyConfig.anomaly_type == anomaly_type
+                ).first()
+
+                if config:
+                    config.config_json = json.dumps(ANOMALY_CONFIG[anomaly_type])
+                    config.updated_at = datetime.utcnow()
+                else:
+                    config = AnomalyConfig(
+                        anomaly_type=anomaly_type,
+                        config_json=json.dumps(ANOMALY_CONFIG[anomaly_type])
+                    )
+                    db.add(config)
+
+                db.commit()
+                logger.info(f"Persisted anomaly config to DB: {anomaly_type}")
+            finally:
+                db.close()
+        except Exception as e:
+            logger.error(f"Failed to persist anomaly config: {e}")
+
         return ANOMALY_CONFIG[anomaly_type]

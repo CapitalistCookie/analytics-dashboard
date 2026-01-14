@@ -376,49 +376,177 @@ async def get_zone_activity_legacy(
 
 @router.get("/staff-performance")
 async def get_staff_performance(
-    date_range: str = Query("today", alias="range", pattern="^(today|week|month)$")
+    date_range: str = Query("today", alias="range", pattern="^(today|week|month)$"),
+    db: Session = Depends(get_db)
 ):
-    """Get staff performance metrics (placeholder - requires ReID data)."""
-    # TODO(feature): Implement staff performance metrics using ReID tracking data
-    # Data sources available:
-    # - PersonSighting table: staff movements by zone
-    # - TrackedPerson: staff classification (is_staff=True)
-    # - PersonEmbedding: staff re-identification accuracy
-    # Metrics to calculate:
-    # - Time spent in customer-facing zones vs back-of-house
-    # - Average response time to customer areas
-    # - Coverage efficiency (zones visited per hour)
-    # - Idle time detection
-    return []
+    """Get staff performance metrics based on zone movements."""
+    from models import TrackedPerson, PersonSighting
+
+    # Define zone categories
+    CUSTOMER_ZONES = {"seating", "entrance", "cashier", "bar_lounge", "vip_room", "karaoke"}
+    BACK_ZONES = {"kitchen", "storage", "office", "back_hallway"}
+
+    # Map date_range to hours
+    hours_map = {"today": 24, "week": 168, "month": 720}
+    hours = hours_map.get(date_range, 24)
+
+    now = datetime.utcnow()
+    start_time = now - timedelta(hours=hours)
+
+    # Query staff members (person_type="staff" or has staff_id)
+    staff_persons = db.query(TrackedPerson).filter(
+        (TrackedPerson.person_type == "staff") | (TrackedPerson.staff_id.isnot(None))
+    ).all()
+
+    result = []
+
+    for staff in staff_persons:
+        # Get sightings for this staff member in the time range
+        sightings = db.query(PersonSighting).filter(
+            PersonSighting.person_id == staff.id,
+            PersonSighting.enter_time >= start_time
+        ).all()
+
+        # Calculate zone time breakdowns
+        zones_visited = {}
+        customer_zone_time = 0
+        back_zone_time = 0
+        total_time = 0
+
+        for sighting in sightings:
+            zone = sighting.zone_name or "unknown"
+
+            # Calculate duration (use exit_time if available, else estimate 5 min)
+            if sighting.exit_time:
+                duration = (sighting.exit_time - sighting.enter_time).total_seconds()
+            else:
+                duration = 300  # 5 minute estimate for active sightings
+
+            # Track zone time
+            if zone not in zones_visited:
+                zones_visited[zone] = 0
+            zones_visited[zone] += duration
+            total_time += duration
+
+            # Categorize zone time
+            if zone in CUSTOMER_ZONES:
+                customer_zone_time += duration
+            elif zone in BACK_ZONES:
+                back_zone_time += duration
+
+        # Calculate efficiency ratio
+        efficiency_ratio = customer_zone_time / total_time if total_time > 0 else 0
+
+        # Format zones_visited as list with minutes
+        zones_list = [
+            {"zone": zone, "time_minutes": round(seconds / 60, 1)}
+            for zone, seconds in sorted(zones_visited.items(), key=lambda x: -x[1])
+        ]
+
+        result.append({
+            "staff_id": staff.id,
+            "display_id": staff.display_id,
+            "name": staff.name or f"Staff {staff.display_id}",
+            "zones_visited": zones_list,
+            "customer_zone_minutes": round(customer_zone_time / 60, 1),
+            "back_zone_minutes": round(back_zone_time / 60, 1),
+            "total_time_minutes": round(total_time / 60, 1),
+            "efficiency_ratio": round(efficiency_ratio, 2)
+        })
+
+    # Sort by efficiency ratio descending
+    result.sort(key=lambda x: -x["efficiency_ratio"])
+
+    return result
 
 
 @router.get("/wait-times")
 async def get_wait_times(
-    date_range: str = Query("today", alias="range", pattern="^(today|week|month)$")
+    date_range: str = Query("today", alias="range", pattern="^(today|week|month)$"),
+    db: Session = Depends(get_db)
 ):
-    """Get wait time trends (placeholder - requires queue tracking)."""
-    # TODO(feature): Implement wait time trends using existing QueueService data
-    # Connect to: services/queue_service.py get_queue_history()
-    # Data needed:
-    # - Historical queue lengths from entrance zone
-    # - Time between enter_time and exit_time for entrance sightings
-    # Return format: [{hour: "09:00", avg_wait_minutes: 2.5, max_wait_minutes: 8}, ...]
-    return []
+    """Get wait time trends from queue tracking data."""
+    # Map date_range to hours
+    hours_map = {"today": 24, "week": 168, "month": 720}
+    hours = hours_map.get(date_range, 24)
+
+    queue_service = QueueService(db)
+    history = queue_service.get_queue_history(zone="entrance", hours=hours)
+
+    # Transform to required format
+    result = []
+    for entry in history:
+        # Parse hour from ISO format and format as HH:MM
+        hour_dt = datetime.fromisoformat(entry["hour"])
+        hour_str = hour_dt.strftime("%H:%M")
+
+        result.append({
+            "hour": hour_str,
+            "avg_wait_minutes": round(entry["avg_wait_seconds"] / 60, 1),
+            "max_wait_minutes": round(entry["max_wait_seconds"] / 60, 1)
+        })
+
+    return result
 
 
 @router.get("/table-turnover")
 async def get_table_turnover(
-    date_range: str = Query("today", alias="range", pattern="^(today|week|month)$")
+    date_range: str = Query("today", alias="range", pattern="^(today|week|month)$"),
+    db: Session = Depends(get_db)
 ):
-    """Get table turnover rates (placeholder - requires table tracking)."""
-    # TODO(feature): Implement table turnover using seating zone dwell times
-    # Approach: Use PersonSighting data for "seating" zone
-    # - Calculate average dwell time in seating area (proxy for meal duration)
-    # - Count unique persons in seating zone per hour
-    # - Turnover = (persons_seated / estimated_table_count) per hour
-    # Note: Requires defining table count in zone config or env var
-    # Alternative: Use pose_state="seated" to count seated customers
-    return []
+    """Get table turnover rates based on seating zone dwell times."""
+    from models import PersonSighting
+
+    # Table count from env var
+    TABLE_COUNT = int(os.getenv("TABLE_COUNT", "20"))
+
+    # Map date_range to hours
+    hours_map = {"today": 24, "week": 168, "month": 720}
+    hours = hours_map.get(date_range, 24)
+
+    now = datetime.utcnow()
+    start_time = now - timedelta(hours=hours)
+
+    # Query sightings in seating zone with completed visits
+    sightings = db.query(PersonSighting).filter(
+        PersonSighting.zone_name == "seating",
+        PersonSighting.enter_time >= start_time,
+        PersonSighting.exit_time.isnot(None)
+    ).all()
+
+    # Group by hour
+    hourly_data = {}
+
+    for sighting in sightings:
+        hour_key = sighting.enter_time.replace(minute=0, second=0, microsecond=0)
+
+        if hour_key not in hourly_data:
+            hourly_data[hour_key] = {
+                "total_duration": 0,
+                "count": 0,
+                "unique_persons": set()
+            }
+
+        # Calculate dwell time
+        duration = (sighting.exit_time - sighting.enter_time).total_seconds()
+        hourly_data[hour_key]["total_duration"] += duration
+        hourly_data[hour_key]["count"] += 1
+        hourly_data[hour_key]["unique_persons"].add(sighting.person_id)
+
+    # Build result
+    result = []
+    for hour_key in sorted(hourly_data.keys()):
+        data = hourly_data[hour_key]
+        avg_duration = data["total_duration"] / data["count"] if data["count"] > 0 else 0
+        turnover_rate = len(data["unique_persons"]) / TABLE_COUNT
+
+        result.append({
+            "hour": hour_key.strftime("%H:%M"),
+            "avg_duration_minutes": round(avg_duration / 60, 1),
+            "turnover_rate": round(turnover_rate, 2)
+        })
+
+    return result
 
 
 @router.get("/customer-staff-breakdown")
@@ -670,6 +798,20 @@ async def get_all_queues(db: Session = Depends(get_db)):
         }
 
     return result
+
+
+# ==================== Transition Statistics Endpoints ====================
+
+@router.get("/transitions")
+async def get_transitions():
+    """
+    Get camera transition statistics from ReID tracking.
+
+    Returns observed transitions between cameras with counts and timing.
+    """
+    from reid_worker import get_transition_stats
+
+    return get_transition_stats()
 
 
 # ==================== Pose Estimation Endpoints ====================
