@@ -69,13 +69,22 @@ app = FastAPI(
 # GZip compression for responses > 500 bytes
 app.add_middleware(GZipMiddleware, minimum_size=500)
 # CORS configuration for frontend
+# TODO(security): Replace allow_origins=["*"] with specific frontend origins
+# - Read allowed origins from environment variable (CORS_ALLOWED_ORIGINS)
+# - Example: ["http://dashboard.jangmojib.com", "http://192.168.1.252:3000"]
+# - This prevents unauthorized cross-origin requests in production
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, specify frontend origin
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# TODO(security): Add rate limiting middleware to prevent API abuse
+# - Use slowapi or similar library
+# - Configure per-endpoint limits (e.g., 100 req/min for analytics, 10 req/min for auth)
+# - Return 429 Too Many Requests with Retry-After header
 # Include routers
 app.include_router(staff.router)
 app.include_router(analytics.router)

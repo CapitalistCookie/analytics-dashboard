@@ -15,6 +15,18 @@ router = APIRouter(prefix="/api/alerts", tags=["alerts"])
 
 
 # Pydantic models
+# TODO(feature): Implement email notification system
+# - Add SMTP configuration (SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS env vars)
+# - Create async send_email_notification() function in services/notification_service.py
+# - Support HTML templates for alert emails
+# - Implement notification batching for high-frequency alerts
+
+# TODO(feature): Implement webhook notification system
+# - Create async send_webhook_notification() function
+# - Support retry logic with exponential backoff (3 retries)
+# - Log webhook delivery status and response codes
+# - Validate webhook URLs on config creation
+
 class AlertConfigCreate(BaseModel):
     """Create alert configuration."""
     name: str = Field(..., min_length=1, max_length=100)
@@ -25,8 +37,8 @@ class AlertConfigCreate(BaseModel):
     zone_id: Optional[int] = None
     camera_id: Optional[str] = None
     is_enabled: bool = True
-    notify_email: bool = False
-    notify_webhook: bool = False
+    notify_email: bool = False  # TODO: Wire up to notification_service.send_email_notification()
+    notify_webhook: bool = False  # TODO: Wire up to notification_service.send_webhook_notification()
     webhook_url: Optional[str] = None
     cooldown_minutes: int = Field(default=15, ge=1, le=1440)
 

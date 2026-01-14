@@ -17,6 +17,18 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 
 
+# TODO(reliability): Add connection health monitoring
+# - Track last activity timestamp per connection
+# - Implement server-side ping at 30-second intervals
+# - Auto-disconnect stale connections (no pong in 60 seconds)
+# - Add connection metrics: total_connected, avg_connection_duration
+
+# TODO(feature): Add subscription filtering
+# - Allow clients to subscribe to specific event types
+# - Example: client sends {"subscribe": ["occupancy:update", "anomaly:alert"]}
+# - Only broadcast matching events to subscribed clients
+# - Reduces unnecessary network traffic
+
 class WebSocketManager:
     """Manages WebSocket connections and broadcasts."""
 
@@ -24,6 +36,7 @@ class WebSocketManager:
         self.active_connections: Set[WebSocket] = set()
         self._lock = asyncio.Lock()
         self._last_occupancy: Optional[Dict[str, Any]] = None
+        # TODO: Add self._connection_timestamps: Dict[WebSocket, datetime] = {}
 
     async def connect(self, websocket: WebSocket):
         """Accept and track a new WebSocket connection."""

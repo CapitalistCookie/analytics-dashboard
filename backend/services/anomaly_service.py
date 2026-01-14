@@ -32,7 +32,19 @@ class AnomalySeverity(str, Enum):
     CRITICAL = "critical"
 
 
-# Configuration - can be updated via API
+# TODO(persistence): Store anomaly configuration in database instead of memory
+# - Create AnomalyConfig model in models.py
+# - Load config from DB on service initialization
+# - Persist changes when update_config() is called
+# - This allows configuration to survive backend restarts
+
+# TODO(realtime): Push anomaly alerts via WebSocket
+# - Import websocket_manager.ws_manager
+# - Broadcast "anomaly:alert" event when anomaly is detected
+# - Include anomaly type, severity, and details in payload
+# - Frontend AnomalyAlertPanel can subscribe to these events
+
+# Configuration - can be updated via API (currently in-memory only)
 ANOMALY_CONFIG = {
     "loitering": {
         "enabled": True,

@@ -351,6 +351,13 @@ _negative_pairs_cache_time: Optional[datetime] = None
 _transition_counts: Dict[Tuple[str, str], int] = {}
 _transition_times: Dict[Tuple[str, str], List[float]] = {}  # Average transition times observed
 
+# TODO(api): Expose transition statistics via API endpoint
+# - Create GET /api/analytics/transitions endpoint in routers/analytics.py
+# - Return _transition_counts as {from_camera: {to_camera: count, ...}, ...}
+# - Return _transition_times averages for path timing analysis
+# - This data helps optimize CAMERA_TRANSITION_TIMES configuration
+# - Consider periodic InfluxDB persistence for historical analysis
+
 # Memory management state
 _detection_count = 0
 _last_cleanup_time = datetime.utcnow()

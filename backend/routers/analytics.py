@@ -379,8 +379,16 @@ async def get_staff_performance(
     date_range: str = Query("today", alias="range", pattern="^(today|week|month)$")
 ):
     """Get staff performance metrics (placeholder - requires ReID data)."""
-    # This would need ReID tracking data to work properly
-    # For now, return empty or placeholder data
+    # TODO(feature): Implement staff performance metrics using ReID tracking data
+    # Data sources available:
+    # - PersonSighting table: staff movements by zone
+    # - TrackedPerson: staff classification (is_staff=True)
+    # - PersonEmbedding: staff re-identification accuracy
+    # Metrics to calculate:
+    # - Time spent in customer-facing zones vs back-of-house
+    # - Average response time to customer areas
+    # - Coverage efficiency (zones visited per hour)
+    # - Idle time detection
     return []
 
 
@@ -389,7 +397,12 @@ async def get_wait_times(
     date_range: str = Query("today", alias="range", pattern="^(today|week|month)$")
 ):
     """Get wait time trends (placeholder - requires queue tracking)."""
-    # This would need specific queue/wait tracking
+    # TODO(feature): Implement wait time trends using existing QueueService data
+    # Connect to: services/queue_service.py get_queue_history()
+    # Data needed:
+    # - Historical queue lengths from entrance zone
+    # - Time between enter_time and exit_time for entrance sightings
+    # Return format: [{hour: "09:00", avg_wait_minutes: 2.5, max_wait_minutes: 8}, ...]
     return []
 
 
@@ -398,7 +411,13 @@ async def get_table_turnover(
     date_range: str = Query("today", alias="range", pattern="^(today|week|month)$")
 ):
     """Get table turnover rates (placeholder - requires table tracking)."""
-    # This would need specific table tracking
+    # TODO(feature): Implement table turnover using seating zone dwell times
+    # Approach: Use PersonSighting data for "seating" zone
+    # - Calculate average dwell time in seating area (proxy for meal duration)
+    # - Count unique persons in seating zone per hour
+    # - Turnover = (persons_seated / estimated_table_count) per hour
+    # Note: Requires defining table count in zone config or env var
+    # Alternative: Use pose_state="seated" to count seated customers
     return []
 
 
