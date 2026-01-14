@@ -13,6 +13,20 @@ from pydantic import BaseModel
 from database import get_db
 from models import TrackedPerson, PersonEmbedding, PersonSighting, Staff, StaffAppearanceEmbedding, NegativePair
 from reid_service import get_reid_service, ReIDService
+from reid_worker import (
+    get_adaptive_threshold,
+    get_all_adaptive_thresholds,
+    get_transition_stats,
+    get_transition_time,
+    ADAPTIVE_THRESHOLDS,
+    CAMERA_ADJACENCY,
+    CAMERA_TRANSITION_TIMES,
+    EXIT_BOOST_THRESHOLDS,
+    _active_tracks,
+    _negative_pairs_cache,
+    _transition_counts,
+    _recent_exits,
+)
 
 router = APIRouter(prefix="/api/reid", tags=["reid"])
 
@@ -1189,3 +1203,210 @@ async def list_regular_customers(
         ))
 
     return {"regulars": result, "total": len(result)}
+
+
+# ============== Adaptive Threshold Stats ==============
+
+class ThresholdStatsResponse(BaseModel):
+    """Response for threshold stats."""
+    current_hour: int
+    current_occupancy: int
+    time_period: str  # "peak", "off_peak", "normal"
+    density_level: str  # "high", "low", "normal"
+    camera_thresholds: dict  # camera_id -> {"same": float, "cross": float}
+    base_config: dict  # Base configuration values
+    negative_pairs_count: int
+
+
+@router.get("/threshold/stats", response_model=ThresholdStatsResponse)
+async def get_threshold_stats():
+    """
+    Get current adaptive threshold statistics.
+
+    Returns current thresholds for each camera based on:
+    - Camera trust level
+    - Time of day (peak vs off-peak)
+    - Current occupancy (density)
+    """
+    current_hour = datetime.now().hour
+    occupancy = len(_active_tracks)
+
+    # Determine time period
+    time_config = ADAPTIVE_THRESHOLDS["time_of_day"]
+    if current_hour in time_config["peak_hours"]:
+        time_period = "peak"
+    elif current_hour in time_config["off_peak_hours"]:
+        time_period = "off_peak"
+    else:
+        time_period = "normal"
+
+    # Determine density level
+    density_config = ADAPTIVE_THRESHOLDS["density"]
+    if occupancy > density_config["high_threshold"]:
+        density_level = "high"
+    elif occupancy < density_config["low_threshold"]:
+        density_level = "low"
+    else:
+        density_level = "normal"
+
+    # Get all camera thresholds
+    camera_thresholds = get_all_adaptive_thresholds(current_hour, occupancy)
+
+    return ThresholdStatsResponse(
+        current_hour=current_hour,
+        current_occupancy=occupancy,
+        time_period=time_period,
+        density_level=density_level,
+        camera_thresholds=camera_thresholds,
+        base_config={
+            "camera_settings": ADAPTIVE_THRESHOLDS["camera"],
+            "time_adjustments": {
+                "peak": time_config["peak_adjustment"],
+                "off_peak": time_config["off_peak_adjustment"],
+            },
+            "density_adjustments": {
+                "high": density_config["high_adjustment"],
+                "low": density_config["low_adjustment"],
+            },
+            "bounds": {
+                "min": ADAPTIVE_THRESHOLDS["min_threshold"],
+                "max": ADAPTIVE_THRESHOLDS["max_threshold"],
+            }
+        },
+        negative_pairs_count=len(_negative_pairs_cache)
+    )
+
+
+@router.get("/threshold/camera/{camera_id}")
+async def get_camera_threshold(camera_id: str, is_cross_camera: bool = False):
+    """
+    Get the current adaptive threshold for a specific camera.
+
+    Args:
+        camera_id: Camera identifier
+        is_cross_camera: Whether this is for cross-camera matching
+    """
+    current_hour = datetime.now().hour
+    occupancy = len(_active_tracks)
+
+    threshold = get_adaptive_threshold(
+        camera_id=camera_id,
+        is_cross_camera=is_cross_camera,
+        current_hour=current_hour,
+        occupancy=occupancy
+    )
+
+    # Get base threshold for comparison
+    camera_config = ADAPTIVE_THRESHOLDS["camera"].get(camera_id, {})
+    base_threshold = camera_config.get("cross" if is_cross_camera else "same")
+
+    return {
+        "camera_id": camera_id,
+        "is_cross_camera": is_cross_camera,
+        "current_threshold": round(threshold, 3),
+        "base_threshold": base_threshold,
+        "adjustment": round(threshold - base_threshold, 3) if base_threshold else None,
+        "current_hour": current_hour,
+        "occupancy": occupancy,
+    }
+
+
+# ============== Transition Statistics ==============
+
+class TransitionStatsResponse(BaseModel):
+    """Response for transition statistics."""
+    total_transitions: int
+    unique_paths: int
+    transitions: list
+    adjacency_graph: dict
+    configured_times: dict
+    exit_boost_config: dict
+    recent_exits_count: int
+
+
+@router.get("/transitions/stats", response_model=TransitionStatsResponse)
+async def get_transitions_stats():
+    """
+    Get statistics on observed camera transitions.
+
+    Returns:
+    - Observed transitions with counts and average times
+    - Camera adjacency graph
+    - Configured transition times
+    - Exit boost configuration
+    """
+    stats = get_transition_stats()
+
+    # Convert tuple keys to string for JSON serialization
+    configured_times = {
+        f"{k[0]} -> {k[1]}": v
+        for k, v in CAMERA_TRANSITION_TIMES.items()
+    }
+
+    return TransitionStatsResponse(
+        total_transitions=stats["total_transitions"],
+        unique_paths=stats["unique_paths"],
+        transitions=stats["transitions"],
+        adjacency_graph=CAMERA_ADJACENCY,
+        configured_times=configured_times,
+        exit_boost_config=EXIT_BOOST_THRESHOLDS,
+        recent_exits_count=len(_recent_exits),
+    )
+
+
+@router.get("/transitions/path/{from_camera}/{to_camera}")
+async def get_transition_path_info(from_camera: str, to_camera: str):
+    """
+    Get information about a specific camera transition path.
+
+    Returns adjacency status, configured transition time, and observed statistics.
+    """
+    is_adjacent = to_camera in CAMERA_ADJACENCY.get(from_camera, [])
+    min_time = get_transition_time(from_camera, to_camera)
+
+    # Get observed stats for this path
+    key = (from_camera, to_camera)
+    observed_count = _transition_counts.get(key, 0)
+
+    return {
+        "from_camera": from_camera,
+        "to_camera": to_camera,
+        "is_adjacent": is_adjacent,
+        "min_transition_seconds": min_time,
+        "observed_count": observed_count,
+        "adjacency_from": CAMERA_ADJACENCY.get(from_camera, []),
+        "adjacency_to": CAMERA_ADJACENCY.get(to_camera, []),
+    }
+
+
+@router.get("/handoff/recent")
+async def get_recent_exits():
+    """
+    Get persons who recently exited cameras (candidates for cross-camera handoff).
+
+    These are persons tracked by the exit boost system.
+    """
+    now = datetime.utcnow()
+    recent = []
+
+    for person_id, (exit_camera, exit_time) in _recent_exits.items():
+        seconds_ago = (now - exit_time).total_seconds()
+        adjacent_cameras = CAMERA_ADJACENCY.get(exit_camera, [])
+
+        recent.append({
+            "person_id": person_id,
+            "exit_camera": exit_camera,
+            "exit_time": exit_time.isoformat(),
+            "seconds_ago": round(seconds_ago, 1),
+            "adjacent_cameras": adjacent_cameras,
+            "exit_boost_eligible": seconds_ago <= EXIT_BOOST_THRESHOLDS["lingering"]["seconds"],
+        })
+
+    # Sort by most recent
+    recent.sort(key=lambda x: x["seconds_ago"])
+
+    return {
+        "recent_exits": recent,
+        "total": len(recent),
+        "boost_thresholds": EXIT_BOOST_THRESHOLDS,
+    }

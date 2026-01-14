@@ -4,3 +4,95 @@ body {
   background-color: #111827;
   color: #f3f4f6;
 }
+
+/* Floor Plan Journey Animations */
+.pulse-ring {
+  animation: pulse-ring 2s ease-in-out infinite;
+  transform-origin: center;
+}
+
+.pulse-dot {
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+
+@keyframes pulse-ring {
+  0%, 100% {
+    opacity: 0.5;
+    r: 8;
+  }
+  50% {
+    opacity: 0.2;
+    r: 12;
+  }
+}
+
+@keyframes pulse-dot {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.7;
+  }
+}
+
+/* Animated path for selected journeys */
+.animated-path {
+  stroke-dasharray: 8, 4;
+  animation: dash-flow 1s linear infinite;
+}
+
+@keyframes dash-flow {
+  to {
+    stroke-dashoffset: -12;
+  }
+}
+
+/* Journey path hover effect */
+.journey-path {
+  transition: opacity 0.2s ease-in-out;
+}
+
+.journey-path:hover path {
+  stroke-width: 4;
+}
+
+.journey-path.selected path {
+  filter: drop-shadow(0 0 4px currentColor);
+}
+
+/* Flow direction arrows */
+.flow-arrows {
+  pointer-events: none;
+}
+
+.flow-arrows.editing {
+  pointer-events: auto;
+}
+
+.flow-arrow-line {
+  transition: opacity 0.2s ease-in-out, stroke-width 0.2s ease-in-out, stroke 0.2s ease-in-out;
+}
+
+.flow-arrow-line.editable {
+  cursor: pointer;
+}
+
+.flow-arrows.editing g:hover .flow-arrow-line {
+  stroke: #818CF8 !important;
+  stroke-width: 2.5 !important;
+  opacity: 1 !important;
+}
+
+/* Subtle pulse animation for primary flow arrows */
+@keyframes flow-pulse {
+  0%, 100% {
+    opacity: 0.8;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+.flow-arrows:not(.editing) line[stroke="#6366F1"] {
+  animation: flow-pulse 3s ease-in-out infinite;
+}

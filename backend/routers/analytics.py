@@ -2,8 +2,10 @@
 
 import csv
 import io
+import json
+import os
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, Dict, List
 
 from fastapi import APIRouter, Query, Response, Depends
 from fastapi.responses import StreamingResponse
@@ -14,6 +16,7 @@ from services.influxdb_service import InfluxDBAnalyticsService
 from services.dwell_time_service import DwellTimeService
 from services.queue_service import QueueService, format_wait_time
 from database import get_db
+from cache import analytics_cache
 
 router = APIRouter(prefix="/api/analytics", tags=["analytics"])
 
@@ -712,3 +715,359 @@ async def get_pose_stats(db: Session = Depends(get_db)):
         standing_by_zone=standing_by_zone,
         updated_at=now.isoformat()
     )
+
+
+# ==================== Cache Stats Endpoint ====================
+
+class CacheStatsResponse(BaseModel):
+    name: str
+    size: int
+    max_size: int
+    hits: int
+    misses: int
+    total_requests: int
+    hit_rate_percent: float
+
+
+@router.get("/cache/stats", response_model=CacheStatsResponse)
+async def get_cache_stats():
+    """
+    Get analytics cache statistics including hit rate.
+
+    Use this endpoint to monitor cache effectiveness.
+    """
+    stats = analytics_cache.get_stats()
+    return CacheStatsResponse(**stats)
+
+
+@router.post("/cache/reset")
+async def reset_cache_stats():
+    """Reset cache hit/miss counters (does not clear cached data)."""
+    analytics_cache.reset_stats()
+    return {"status": "ok", "message": "Cache stats reset"}
+
+
+@router.post("/cache/clear")
+async def clear_cache():
+    """Clear all cached analytics data."""
+    await analytics_cache.clear()
+    analytics_cache.reset_stats()
+    return {"status": "ok", "message": "Cache cleared"}
+
+
+# ==================== Floor Plan Camera Positions ====================
+
+# File to store camera positions
+CAMERA_POSITIONS_FILE = "/app/data/camera_positions.json"
+
+# Default positions if no file exists
+DEFAULT_CAMERA_POSITIONS = {
+    "entrance": {"x": 10, "y": 50, "label": "Entrance"},
+    "bar_lounge": {"x": 25, "y": 40, "label": "Bar Lounge"},
+    "bar": {"x": 25, "y": 25, "label": "Bar"},
+    "seating": {"x": 50, "y": 55, "label": "Seating"},
+    "cashier": {"x": 40, "y": 35, "label": "Cashier"},
+    "food_pickup": {"x": 35, "y": 15, "label": "Food Pickup"},
+    "kitchen": {"x": 50, "y": 10, "label": "Kitchen"},
+    "hallway": {"x": 60, "y": 45, "label": "Hallway"},
+    "back_hallway": {"x": 75, "y": 25, "label": "Back Hall"},
+    "vip_room": {"x": 70, "y": 65, "label": "VIP Room"},
+    "karaoke": {"x": 85, "y": 75, "label": "Karaoke"},
+    "patio": {"x": 65, "y": 80, "label": "Patio"},
+    "storage": {"x": 85, "y": 15, "label": "Storage"},
+    "office": {"x": 90, "y": 30, "label": "Office"},
+}
+
+
+class CameraPosition(BaseModel):
+    x: float
+    y: float
+    label: str
+
+
+class CameraPositionsUpdate(BaseModel):
+    positions: Dict[str, CameraPosition]
+
+
+def load_camera_positions() -> dict:
+    """Load camera positions from file or return defaults."""
+    if os.path.exists(CAMERA_POSITIONS_FILE):
+        try:
+            with open(CAMERA_POSITIONS_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return DEFAULT_CAMERA_POSITIONS.copy()
+
+
+def save_camera_positions(positions: dict):
+    """Save camera positions to file."""
+    os.makedirs(os.path.dirname(CAMERA_POSITIONS_FILE), exist_ok=True)
+    with open(CAMERA_POSITIONS_FILE, "w") as f:
+        json.dump(positions, f, indent=2)
+
+
+@router.get("/floorplan/positions")
+async def get_camera_positions():
+    """
+    Get camera positions for floor plan visualization.
+
+    Returns dict of camera_id -> {x, y, label}
+    Coordinates are percentages (0-100) of the floor plan dimensions.
+    """
+    positions = load_camera_positions()
+    return {"positions": positions}
+
+
+@router.put("/floorplan/positions")
+async def update_camera_positions(update: CameraPositionsUpdate):
+    """
+    Update camera positions for floor plan.
+
+    Expects dict of camera_id -> {x, y, label}
+    Coordinates should be percentages (0-100).
+    """
+    # Load existing and merge with updates
+    positions = load_camera_positions()
+
+    for camera_id, pos in update.positions.items():
+        positions[camera_id] = {
+            "x": pos.x,
+            "y": pos.y,
+            "label": pos.label,
+        }
+
+    save_camera_positions(positions)
+    return {"status": "ok", "message": f"Updated {len(update.positions)} camera positions"}
+
+
+@router.put("/floorplan/positions/{camera_id}")
+async def update_single_camera_position(camera_id: str, position: CameraPosition):
+    """
+    Update a single camera's position.
+    """
+    positions = load_camera_positions()
+    positions[camera_id] = {
+        "x": position.x,
+        "y": position.y,
+        "label": position.label,
+    }
+    save_camera_positions(positions)
+    return {"status": "ok", "camera_id": camera_id, "position": positions[camera_id]}
+
+
+@router.post("/floorplan/positions/reset")
+async def reset_camera_positions():
+    """Reset camera positions to defaults."""
+    save_camera_positions(DEFAULT_CAMERA_POSITIONS.copy())
+    return {"status": "ok", "message": "Camera positions reset to defaults"}
+
+
+# ==================== Floor Plan Flow Connections ====================
+
+FLOW_CONNECTIONS_FILE = "/app/data/flow_connections.json"
+
+# Default flow connections: [from, to] pairs showing direction of typical flow
+DEFAULT_FLOW_CONNECTIONS = [
+    # From entrance
+    ["entrance", "bar_lounge"],
+    ["entrance", "hallway"],
+    # From bar_lounge
+    ["bar_lounge", "cashier"],
+    ["bar_lounge", "seating"],
+    ["bar_lounge", "bar"],
+    # Bar area
+    ["bar", "food_pickup"],
+    ["food_pickup", "kitchen"],
+    # Kitchen/back area
+    ["kitchen", "back_hallway"],
+    ["kitchen", "storage"],
+    ["back_hallway", "storage"],
+    ["back_hallway", "office"],
+    ["back_hallway", "hallway"],
+    # Main area
+    ["hallway", "seating"],
+    ["hallway", "cashier"],
+    ["seating", "cashier"],
+    ["seating", "patio"],
+    # VIP/Karaoke
+    ["cashier", "vip_room"],
+    ["vip_room", "karaoke"],
+]
+
+
+class FlowConnection(BaseModel):
+    from_camera: str
+    to_camera: str
+
+
+class FlowConnectionsUpdate(BaseModel):
+    connections: List[List[str]]
+
+
+def load_flow_connections() -> List[List[str]]:
+    """Load flow connections from file or return defaults."""
+    if os.path.exists(FLOW_CONNECTIONS_FILE):
+        try:
+            with open(FLOW_CONNECTIONS_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return [list(conn) for conn in DEFAULT_FLOW_CONNECTIONS]
+
+
+def save_flow_connections(connections: List[List[str]]):
+    """Save flow connections to file."""
+    os.makedirs(os.path.dirname(FLOW_CONNECTIONS_FILE), exist_ok=True)
+    with open(FLOW_CONNECTIONS_FILE, "w") as f:
+        json.dump(connections, f, indent=2)
+
+
+# Backup file path
+FLOW_CONNECTIONS_BACKUP_FILE = "/app/data/flow_connections_backup.json"
+
+
+def backup_flow_connections():
+    """Create a backup of current flow connections."""
+    connections = load_flow_connections()
+    os.makedirs(os.path.dirname(FLOW_CONNECTIONS_BACKUP_FILE), exist_ok=True)
+    with open(FLOW_CONNECTIONS_BACKUP_FILE, "w") as f:
+        json.dump({
+            "connections": connections,
+            "backup_time": datetime.now().isoformat(),
+        }, f, indent=2)
+
+
+def load_flow_connections_backup() -> Optional[dict]:
+    """Load backup of flow connections if it exists."""
+    if os.path.exists(FLOW_CONNECTIONS_BACKUP_FILE):
+        try:
+            with open(FLOW_CONNECTIONS_BACKUP_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return None
+
+
+@router.get("/floorplan/flows")
+async def get_flow_connections():
+    """
+    Get flow connections for floor plan visualization.
+
+    Returns list of [from_camera, to_camera] pairs indicating direction.
+    """
+    connections = load_flow_connections()
+    return {"connections": connections}
+
+
+@router.put("/floorplan/flows")
+async def update_flow_connections(update: FlowConnectionsUpdate):
+    """
+    Update all flow connections.
+
+    Expects list of [from_camera, to_camera] pairs.
+    Creates a backup before saving and invalidates the ReID adjacency cache.
+    """
+    # Create backup before saving
+    backup_flow_connections()
+
+    # Save new connections
+    save_flow_connections(update.connections)
+
+    # Invalidate ReID adjacency cache so it picks up changes
+    try:
+        from reid_worker import invalidate_adjacency_cache
+        invalidate_adjacency_cache()
+    except ImportError:
+        pass  # ReID worker may not be available
+
+    return {"status": "ok", "message": f"Updated {len(update.connections)} flow connections (backup created)"}
+
+
+@router.put("/floorplan/flows/reverse")
+async def reverse_flow_connection(connection: FlowConnection):
+    """
+    Reverse a specific flow connection direction.
+    """
+    connections = load_flow_connections()
+
+    # Find and reverse the connection
+    for i, conn in enumerate(connections):
+        if conn[0] == connection.from_camera and conn[1] == connection.to_camera:
+            connections[i] = [connection.to_camera, connection.from_camera]
+            save_flow_connections(connections)
+            return {
+                "status": "ok",
+                "message": f"Reversed flow: {connection.to_camera} -> {connection.from_camera}",
+                "connection": connections[i]
+            }
+
+    # Connection not found - maybe it's already reversed, check the other direction
+    for i, conn in enumerate(connections):
+        if conn[0] == connection.to_camera and conn[1] == connection.from_camera:
+            connections[i] = [connection.from_camera, connection.to_camera]
+            save_flow_connections(connections)
+            return {
+                "status": "ok",
+                "message": f"Reversed flow: {connection.from_camera} -> {connection.to_camera}",
+                "connection": connections[i]
+            }
+
+    return {"status": "error", "message": "Connection not found"}
+
+
+@router.post("/floorplan/flows/reset")
+async def reset_flow_connections():
+    """Reset flow connections to defaults."""
+    # Create backup before reset
+    backup_flow_connections()
+
+    save_flow_connections([list(conn) for conn in DEFAULT_FLOW_CONNECTIONS])
+
+    # Invalidate ReID cache
+    try:
+        from reid_worker import invalidate_adjacency_cache
+        invalidate_adjacency_cache()
+    except ImportError:
+        pass
+
+    return {"status": "ok", "message": "Flow connections reset to defaults (backup created)"}
+
+
+@router.post("/floorplan/flows/restore")
+async def restore_flow_connections():
+    """Restore flow connections from backup."""
+    backup = load_flow_connections_backup()
+
+    if not backup or "connections" not in backup:
+        return {"status": "error", "message": "No backup found"}
+
+    save_flow_connections(backup["connections"])
+
+    # Invalidate ReID cache
+    try:
+        from reid_worker import invalidate_adjacency_cache
+        invalidate_adjacency_cache()
+    except ImportError:
+        pass
+
+    return {
+        "status": "ok",
+        "message": f"Restored from backup created at {backup.get('backup_time', 'unknown')}",
+        "connections_count": len(backup["connections"])
+    }
+
+
+@router.get("/floorplan/flows/backup")
+async def get_flow_connections_backup():
+    """Get information about the current backup."""
+    backup = load_flow_connections_backup()
+
+    if not backup:
+        return {"has_backup": False}
+
+    return {
+        "has_backup": True,
+        "backup_time": backup.get("backup_time"),
+        "connections_count": len(backup.get("connections", []))
+    }

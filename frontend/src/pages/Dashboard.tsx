@@ -5,6 +5,7 @@ import CameraCard from '../components/CameraCard'
 import CameraFeedModal from '../components/CameraFeedModal'
 import WebRTCGridCard from '../components/WebRTCGridCard'
 import JourneyPanel from '../components/JourneyPanel'
+import FloorPlanView from '../components/FloorPlanView'
 import QueueStatusWidget from '../components/QueueStatusWidget'
 import { useStreamQuality, QUALITY_CONFIGS, type StreamQuality } from '../context/StreamQualityContext'
 import { useCamera } from '../context/CameraContext'
@@ -592,10 +593,18 @@ export default function Dashboard() {
     const saved = localStorage.getItem('dashboardJourneyPanelCollapsed')
     return saved === 'true'
   })
+  const [viewMode, setViewMode] = useState<'cameras' | 'floorplan'>(() => {
+    const saved = localStorage.getItem('dashboardViewMode')
+    return (saved as 'cameras' | 'floorplan') || 'cameras'
+  })
 
   useEffect(() => {
     localStorage.setItem('dashboardJourneyPanelCollapsed', String(journeyPanelCollapsed))
   }, [journeyPanelCollapsed])
+
+  useEffect(() => {
+    localStorage.setItem('dashboardViewMode', viewMode)
+  }, [viewMode])
 
   return (
     <div className="space-y-4 md:space-y-6">
@@ -609,24 +618,65 @@ export default function Dashboard() {
 
       <OccupancyChart />
 
-      {/* Camera Grid with Journey Panel */}
-      <div className="flex gap-4">
-        <div className="flex-1">
-          <CameraGrid />
-        </div>
-        {/* Journey Panel - collapsible sidebar */}
-        <div className={`transition-all duration-300 ${journeyPanelCollapsed ? 'w-12' : 'w-80'} hidden lg:block`}>
-          <JourneyPanel
-            collapsed={journeyPanelCollapsed}
-            onToggle={() => setJourneyPanelCollapsed(!journeyPanelCollapsed)}
-          />
+      {/* View Mode Toggle */}
+      <div className="flex items-center gap-3">
+        <span className="text-sm text-gray-400">View:</span>
+        <div className="flex bg-gray-700 rounded-lg p-0.5">
+          <button
+            onClick={() => setViewMode('cameras')}
+            className={`px-4 py-1.5 rounded text-sm font-medium transition-colors flex items-center gap-2 ${
+              viewMode === 'cameras'
+                ? 'bg-blue-600 text-white'
+                : 'text-gray-400 hover:text-white'
+            }`}
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
+            </svg>
+            Camera Grid
+          </button>
+          <button
+            onClick={() => setViewMode('floorplan')}
+            className={`px-4 py-1.5 rounded text-sm font-medium transition-colors flex items-center gap-2 ${
+              viewMode === 'floorplan'
+                ? 'bg-green-600 text-white'
+                : 'text-gray-400 hover:text-white'
+            }`}
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7" />
+            </svg>
+            Floor Plan
+          </button>
         </div>
       </div>
 
-      {/* Journey Panel - full width on smaller screens */}
-      <div className="lg:hidden">
-        <JourneyPanel />
-      </div>
+      {/* Main Content Area */}
+      {viewMode === 'cameras' ? (
+        <>
+          {/* Camera Grid with Journey Panel */}
+          <div className="flex gap-4">
+            <div className="flex-1">
+              <CameraGrid />
+            </div>
+            {/* Journey Panel - collapsible sidebar */}
+            <div className={`transition-all duration-300 ${journeyPanelCollapsed ? 'w-12' : 'w-80'} hidden lg:block`}>
+              <JourneyPanel
+                collapsed={journeyPanelCollapsed}
+                onToggle={() => setJourneyPanelCollapsed(!journeyPanelCollapsed)}
+              />
+            </div>
+          </div>
+
+          {/* Journey Panel - full width on smaller screens */}
+          <div className="lg:hidden">
+            <JourneyPanel />
+          </div>
+        </>
+      ) : (
+        /* Floor Plan View */
+        <FloorPlanView />
+      )}
     </div>
   )
 }

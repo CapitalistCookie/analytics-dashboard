@@ -5,8 +5,14 @@ from typing import Optional
 import logging
 
 from database import InfluxDBConnection, INFLUXDB_BUCKET, INFLUXDB_ORG
+from cache import cached_query
 
 logger = logging.getLogger(__name__)
+
+# TTL Constants (in seconds)
+TTL_5_MIN = 300      # hourly traffic, zone activity, dwell times
+TTL_10_MIN = 600     # occupancy history, dwell distribution
+TTL_1_HOUR = 3600    # peak hours, heatmap, daily traffic, summary
 
 
 class InfluxDBAnalyticsService:
@@ -23,6 +29,7 @@ class InfluxDBAnalyticsService:
         return datetime.strptime(date_str, "%Y-%m-%d")
 
     @classmethod
+    @cached_query(ttl=TTL_5_MIN)
     def get_hourly_traffic(cls, date: str) -> list[dict]:
         """Get hourly traffic counts for a specific date.
 
@@ -74,6 +81,7 @@ class InfluxDBAnalyticsService:
             return [{"hour": f"{h:02d}:00", "customers": 0, "staff": 0} for h in range(24)]
 
     @classmethod
+    @cached_query(ttl=TTL_1_HOUR)
     def get_daily_traffic(cls, start_date: str, end_date: str) -> list[dict]:
         """Get daily traffic counts for a date range.
 
@@ -128,6 +136,7 @@ class InfluxDBAnalyticsService:
             return []
 
     @classmethod
+    @cached_query(ttl=TTL_5_MIN)
     def get_traffic_by_camera(cls, date: str) -> list[dict]:
         """Get traffic counts by camera for a specific date.
 
@@ -179,6 +188,7 @@ class InfluxDBAnalyticsService:
             return []
 
     @classmethod
+    @cached_query(ttl=TTL_5_MIN)
     def get_zone_activity(cls, date: Optional[str] = None, days: int = 1) -> list[dict]:
         """Get zone activity counts.
 
@@ -238,6 +248,7 @@ class InfluxDBAnalyticsService:
             return []
 
     @classmethod
+    @cached_query(ttl=TTL_5_MIN)
     def get_dwell_times_by_zone(cls, date: Optional[str] = None, days: int = 1) -> list[dict]:
         """Get average dwell times by zone.
 
@@ -293,6 +304,7 @@ class InfluxDBAnalyticsService:
             return []
 
     @classmethod
+    @cached_query(ttl=TTL_5_MIN)
     def get_average_dwell_time(cls, date: Optional[str] = None, days: int = 1) -> dict:
         """Get overall average dwell time.
 
@@ -352,6 +364,7 @@ class InfluxDBAnalyticsService:
             return {"avg_seconds": 0, "avg_minutes": 0, "total_events": 0}
 
     @classmethod
+    @cached_query(ttl=TTL_10_MIN)
     def get_dwell_distribution(cls, date: Optional[str] = None, days: int = 1) -> list[dict]:
         """Get dwell time distribution in buckets.
 
@@ -417,6 +430,7 @@ class InfluxDBAnalyticsService:
             return []
 
     @classmethod
+    @cached_query(ttl=TTL_1_HOUR)
     def get_peak_hours(cls, days: int = 7) -> list[dict]:
         """Get peak hours analysis over a period.
 
@@ -470,6 +484,7 @@ class InfluxDBAnalyticsService:
             return [{"hour": f"{h:02d}:00", "avg_count": 0, "total_count": 0} for h in range(24)]
 
     @classmethod
+    @cached_query(ttl=TTL_1_HOUR)
     def get_day_hour_heatmap(cls, days: int = 7) -> list[dict]:
         """Get day/hour heatmap data for visualization.
 
@@ -593,6 +608,7 @@ class InfluxDBAnalyticsService:
             }
 
     @classmethod
+    @cached_query(ttl=TTL_10_MIN)
     def get_occupancy_history(cls, date: str) -> list[dict]:
         """Get occupancy history for a specific date.
 
@@ -638,6 +654,7 @@ class InfluxDBAnalyticsService:
             return []
 
     @classmethod
+    @cached_query(ttl=TTL_1_HOUR)
     def get_analytics_summary(cls, date: str) -> dict:
         """Get summary analytics for a specific date.
 

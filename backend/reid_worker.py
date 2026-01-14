@@ -13,14 +13,16 @@ import asyncio
 import logging
 import gc
 from datetime import datetime, timedelta
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, Dict, List, Tuple, Set
 from contextlib import asynccontextmanager
 
 import httpx
 import numpy as np
 
+from sqlalchemy.orm import joinedload
+
 from database import SessionLocal, InfluxDBConnection, INFLUXDB_BUCKET, INFLUXDB_ORG
-from models import TrackedPerson, PersonEmbedding, PersonSighting, Staff
+from models import TrackedPerson, PersonEmbedding, PersonSighting, Staff, NegativePair
 from reid_service import get_reid_service
 from influxdb_client import Point
 from services.pose_service import get_pose_service, PoseState
@@ -38,6 +40,10 @@ CANDIDATE_EXPIRY_SECONDS = 120  # Candidates expire after 2 minutes (was 5)
 DETECTION_COUNT_FOR_GC = 50  # Run garbage collection every N detections (was 100)
 MAX_LAST_EMBEDDING_TIME = 50  # Maximum entries in _last_embedding_time
 MAX_PERSON_LAST_CAMERA = 100  # Maximum entries in _person_last_camera
+
+# Average embedding cache - prevents recomputing average for every detection
+MAX_CACHED_AVG_EMBEDDINGS = 100  # Maximum cached average embeddings
+AVG_EMBEDDING_CACHE_TTL = 300  # Cache TTL in seconds (5 minutes)
 
 # Configuration
 MQTT_HOST = os.getenv("MQTT_HOST", "localhost")
@@ -70,6 +76,45 @@ ADJACENCY_BOOST = float(os.getenv("REID_ADJACENCY_BOOST", "0.05"))  # Reduced si
 
 # Color histogram matching threshold (0-1, higher = stricter)
 COLOR_HISTOGRAM_THRESHOLD = float(os.getenv("REID_COLOR_THRESHOLD", "0.4"))  # Minimum color similarity
+
+# Adaptive threshold configuration - adjusts based on camera trust, time, and density
+ADAPTIVE_THRESHOLDS = {
+    "camera": {
+        # HIGH_TRUST - good angles, stricter thresholds
+        "entrance": {"same": 0.92, "cross": 0.87},
+        "bar_lounge": {"same": 0.92, "cross": 0.87},
+        "seating": {"same": 0.91, "cross": 0.86},
+        "cashier": {"same": 0.91, "cross": 0.86},
+        "food_pickup": {"same": 0.91, "cross": 0.86},
+        # MEDIUM_TRUST - decent views
+        "vip_room": {"same": 0.88, "cross": 0.83},
+        "karaoke": {"same": 0.88, "cross": 0.83},
+        "kitchen": {"same": 0.88, "cross": 0.83},
+        "patio": {"same": 0.88, "cross": 0.83},
+        # LOW_TRUST - top-down, more lenient
+        "bar": {"same": 0.85, "cross": 0.80},
+    },
+    "time_of_day": {
+        # Peak hours: 12-13 (lunch), 18-20 (dinner) - more crowded, lower threshold
+        "peak_hours": [12, 13, 18, 19, 20],
+        "peak_adjustment": -0.02,
+        # Off-peak hours: easier to distinguish, higher threshold
+        "off_peak_hours": [9, 10, 11, 14, 15, 16, 17, 21, 22, 23],
+        "off_peak_adjustment": +0.02,
+    },
+    "density": {
+        "high_threshold": 40,   # >40 active tracks = high density
+        "high_adjustment": -0.03,
+        "low_threshold": 15,    # <15 active tracks = low density
+        "low_adjustment": +0.02,
+    },
+    # Absolute bounds to prevent unreasonable thresholds
+    "min_threshold": 0.75,
+    "max_threshold": 0.95,
+}
+
+# Negative pairs cache refresh interval (seconds)
+NEGATIVE_PAIRS_CACHE_TTL = 300  # 5 minutes
 
 # Pose estimation settings
 POSE_DETECTION_ENABLED = os.getenv("POSE_DETECTION_ENABLED", "true").lower() == "true"
@@ -121,22 +166,159 @@ CAMERA_ZONES: Dict[str, str] = {
 }
 
 # Camera adjacency graph - defines physical proximity for cross-camera matching
-# Based on actual floor plan layout:
-#   entrance → bar_lounge → [cashier, seating, bar]
-#   cashier connects bar_lounge to vip_room
-#   seating is main customer area
-#   food_pickup/kitchen are staff service areas
-CAMERA_ADJACENCY: Dict[str, List[str]] = {
-    "entrance": ["bar_lounge"],
+# Complete graph including all cameras based on actual floor plan layout:
+#   entrance → bar_lounge/hallway → [cashier, seating, bar]
+#   hallway is main corridor connecting many areas
+#   back_hallway connects kitchen/storage/office area
+
+# DEFAULT adjacency - used as fallback and for rollback
+DEFAULT_CAMERA_ADJACENCY: Dict[str, List[str]] = {
+    "entrance": ["bar_lounge", "hallway"],
+    "hallway": ["entrance", "seating", "back_hallway", "cashier"],
     "bar_lounge": ["entrance", "cashier", "seating", "bar"],
-    "cashier": ["bar_lounge", "vip_room", "seating"],
-    "seating": ["bar_lounge", "cashier", "patio"],
+    "bar": ["bar_lounge", "food_pickup"],
+    "seating": ["bar_lounge", "hallway", "cashier", "patio"],
+    "cashier": ["bar_lounge", "hallway", "seating", "vip_room"],
+    "food_pickup": ["bar", "kitchen"],
+    "kitchen": ["food_pickup", "back_hallway", "storage"],
+    "back_hallway": ["hallway", "kitchen", "storage", "office"],
+    "storage": ["kitchen", "back_hallway"],
+    "office": ["back_hallway"],
     "vip_room": ["cashier", "karaoke"],
     "karaoke": ["vip_room"],
-    "bar": ["bar_lounge", "food_pickup"],
-    "food_pickup": ["bar", "kitchen"],
-    "kitchen": ["food_pickup"],
     "patio": ["seating"],
+}
+
+# File path for flow connections (edited via UI)
+FLOW_CONNECTIONS_FILE = "/app/data/flow_connections.json"
+
+# Cache for loaded adjacency to avoid repeated file reads
+_cached_camera_adjacency: Optional[Dict[str, List[str]]] = None
+_adjacency_cache_time: Optional[datetime] = None
+ADJACENCY_CACHE_TTL = 60  # Refresh from file every 60 seconds
+
+
+def _load_flow_connections_from_file() -> Optional[List[List[str]]]:
+    """Load flow connections from JSON file."""
+    import json
+    try:
+        if os.path.exists(FLOW_CONNECTIONS_FILE):
+            with open(FLOW_CONNECTIONS_FILE, "r") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    return data
+    except Exception as e:
+        logger.warning(f"Failed to load flow connections from file: {e}")
+    return None
+
+
+def _convert_connections_to_adjacency(connections: List[List[str]]) -> Dict[str, List[str]]:
+    """
+    Convert flow connections pairs to adjacency dictionary.
+
+    Flow connections are bidirectional pairs like [["entrance", "bar_lounge"], ...]
+    This converts them to adjacency format {"entrance": ["bar_lounge", ...], ...}
+    """
+    adjacency: Dict[str, List[str]] = {}
+
+    for conn in connections:
+        if len(conn) >= 2:
+            cam1, cam2 = conn[0], conn[1]
+
+            # Add bidirectional connections
+            if cam1 not in adjacency:
+                adjacency[cam1] = []
+            if cam2 not in adjacency[cam1]:
+                adjacency[cam1].append(cam2)
+
+            if cam2 not in adjacency:
+                adjacency[cam2] = []
+            if cam1 not in adjacency[cam2]:
+                adjacency[cam2].append(cam1)
+
+    return adjacency
+
+
+def get_camera_adjacency() -> Dict[str, List[str]]:
+    """
+    Get current camera adjacency graph.
+
+    Loads from flow_connections.json if available, otherwise uses defaults.
+    Results are cached for performance with TTL refresh.
+    """
+    global _cached_camera_adjacency, _adjacency_cache_time
+
+    now = datetime.utcnow()
+
+    # Check if cache is still valid
+    if (_cached_camera_adjacency is not None and
+        _adjacency_cache_time is not None and
+        (now - _adjacency_cache_time).total_seconds() < ADJACENCY_CACHE_TTL):
+        return _cached_camera_adjacency
+
+    # Try to load from file
+    connections = _load_flow_connections_from_file()
+
+    if connections:
+        _cached_camera_adjacency = _convert_connections_to_adjacency(connections)
+        logger.info(f"Loaded camera adjacency from file: {len(_cached_camera_adjacency)} cameras")
+    else:
+        _cached_camera_adjacency = DEFAULT_CAMERA_ADJACENCY.copy()
+        logger.info("Using default camera adjacency (no file found)")
+
+    _adjacency_cache_time = now
+    return _cached_camera_adjacency
+
+
+def invalidate_adjacency_cache():
+    """Force reload of adjacency from file on next access."""
+    global _cached_camera_adjacency, _adjacency_cache_time
+    _cached_camera_adjacency = None
+    _adjacency_cache_time = None
+    logger.info("Camera adjacency cache invalidated")
+
+
+# For backward compatibility - static reference uses defaults initially
+CAMERA_ADJACENCY = DEFAULT_CAMERA_ADJACENCY
+
+# Camera transition times (in seconds) - minimum time to walk between cameras
+# Keys are (from_camera, to_camera) tuples, value is min seconds
+CAMERA_TRANSITION_TIMES: Dict[tuple, int] = {
+    # Direct adjacent transitions (fast)
+    ("entrance", "bar_lounge"): 3,
+    ("entrance", "hallway"): 3,
+    ("bar_lounge", "entrance"): 3,
+    ("bar_lounge", "cashier"): 4,
+    ("bar_lounge", "seating"): 5,
+    ("bar_lounge", "bar"): 4,
+    ("hallway", "seating"): 4,
+    ("hallway", "cashier"): 4,
+    ("hallway", "back_hallway"): 5,
+    ("seating", "cashier"): 4,
+    ("seating", "patio"): 3,
+    ("cashier", "vip_room"): 4,
+    ("vip_room", "karaoke"): 3,
+    ("bar", "food_pickup"): 4,
+    ("food_pickup", "kitchen"): 3,
+    ("kitchen", "back_hallway"): 4,
+    ("kitchen", "storage"): 3,
+    ("back_hallway", "storage"): 3,
+    ("back_hallway", "office"): 4,
+    # Non-adjacent transitions (longer paths)
+    ("entrance", "seating"): 8,      # Through bar_lounge
+    ("entrance", "cashier"): 7,      # Through bar_lounge
+    ("bar_lounge", "vip_room"): 8,   # Through cashier
+    ("bar_lounge", "kitchen"): 12,   # Through bar/food_pickup
+    ("seating", "vip_room"): 8,      # Through cashier
+    ("seating", "kitchen"): 15,      # Long path
+}
+DEFAULT_TRANSITION_TIME = 5  # Default for unspecified pairs
+
+# Exit boost configuration - reward matching persons who recently exited adjacent cameras
+EXIT_BOOST_THRESHOLDS = {
+    "immediate": {"seconds": 10, "boost": 0.10},  # Just left, high confidence
+    "recent": {"seconds": 30, "boost": 0.06},     # Recently left
+    "lingering": {"seconds": 60, "boost": 0.03}, # Left within a minute
 }
 
 # Tracking state
@@ -151,6 +333,20 @@ _candidate_detections: Dict[str, Dict[str, dict]] = {}
 
 # Person color histograms for matching
 _person_color_histograms: Dict[int, np.ndarray] = {}  # person_id -> average color histogram
+
+# Average embedding cache - stores precomputed L2-normalized average embeddings
+# Structure: {person_id: (avg_embedding: np.ndarray, cached_at: datetime)}
+_person_avg_embeddings: Dict[int, Tuple[np.ndarray, datetime]] = {}
+
+# Negative pairs cache - prevents matching persons explicitly marked as different
+# Structure: {person_id: set of person_ids that are NOT the same person}
+_negative_pairs_cache: Dict[int, Set[int]] = {}
+_negative_pairs_cache_time: Optional[datetime] = None
+
+# Transition statistics - tracks observed camera transitions for analysis
+# Structure: {(from_camera, to_camera): count}
+_transition_counts: Dict[Tuple[str, str], int] = {}
+_transition_times: Dict[Tuple[str, str], List[float]] = {}  # Average transition times observed
 
 # Memory management state
 _detection_count = 0
@@ -174,8 +370,286 @@ def log_cache_sizes():
     logger.info(
         f"[CACHE] tracks:{len(_active_tracks)} candidates:{total_candidates} "
         f"colors:{len(_person_color_histograms)} embed_time:{len(_last_embedding_time)} "
-        f"last_cam:{len(_person_last_camera)} exits:{len(_recent_exits)}"
+        f"last_cam:{len(_person_last_camera)} exits:{len(_recent_exits)} "
+        f"avg_emb:{len(_person_avg_embeddings)} neg_pairs:{len(_negative_pairs_cache)} "
+        f"transitions:{len(_transition_counts)}"
     )
+
+
+def get_transition_time(from_camera: str, to_camera: str) -> int:
+    """
+    Get the minimum transition time between two cameras.
+
+    Checks both directions and returns the configured time or default.
+    """
+    # Check direct mapping
+    if (from_camera, to_camera) in CAMERA_TRANSITION_TIMES:
+        return CAMERA_TRANSITION_TIMES[(from_camera, to_camera)]
+
+    # Check reverse mapping (symmetric)
+    if (to_camera, from_camera) in CAMERA_TRANSITION_TIMES:
+        return CAMERA_TRANSITION_TIMES[(to_camera, from_camera)]
+
+    return DEFAULT_TRANSITION_TIME
+
+
+def get_exit_boost(person_id: int, current_camera: str) -> float:
+    """
+    Calculate matching boost for a person who recently exited an adjacent camera.
+
+    Returns a boost value (0.0 - 0.10) based on how recently the person
+    was seen on an adjacent camera.
+    """
+    if person_id not in _recent_exits:
+        return 0.0
+
+    exit_camera, exit_time = _recent_exits[person_id]
+
+    # Check if the exit camera is adjacent to current camera
+    adjacent_cameras = get_camera_adjacency().get(current_camera, [])
+    if exit_camera not in adjacent_cameras:
+        return 0.0
+
+    # Calculate time since exit
+    seconds_since_exit = (datetime.utcnow() - exit_time).total_seconds()
+
+    # Apply tiered boost based on recency
+    for tier_name, tier_config in EXIT_BOOST_THRESHOLDS.items():
+        if seconds_since_exit <= tier_config["seconds"]:
+            boost = tier_config["boost"]
+            logger.debug(
+                f"Exit boost for person {person_id}: {boost} "
+                f"({tier_name}, {seconds_since_exit:.1f}s ago from {exit_camera})"
+            )
+            return boost
+
+    return 0.0
+
+
+def check_temporal_exclusion(
+    last_camera: str,
+    current_camera: str,
+    last_seen: datetime,
+    now: datetime = None
+) -> Tuple[bool, float]:
+    """
+    Check if a person could have physically transitioned between cameras.
+
+    Uses dynamic transition times based on camera pair configuration.
+
+    Returns:
+        (is_excluded, seconds_elapsed): Tuple of exclusion status and elapsed time
+    """
+    if now is None:
+        now = datetime.utcnow()
+
+    seconds_elapsed = (now - last_seen).total_seconds()
+
+    # Same camera - no exclusion needed
+    if last_camera == current_camera:
+        return (False, seconds_elapsed)
+
+    # Get minimum transition time
+    min_transition = get_transition_time(last_camera, current_camera)
+
+    # Check if cameras are adjacent
+    adjacent_cameras = get_camera_adjacency().get(last_camera, [])
+    are_adjacent = current_camera in adjacent_cameras
+
+    if are_adjacent:
+        # Adjacent cameras - use configured transition time
+        is_excluded = seconds_elapsed < min_transition
+    else:
+        # Non-adjacent cameras - require more time (1.5x minimum)
+        is_excluded = seconds_elapsed < (min_transition * 1.5)
+
+    return (is_excluded, seconds_elapsed)
+
+
+def record_transition(from_camera: str, to_camera: str, transition_seconds: float):
+    """
+    Record an observed camera transition for statistics.
+
+    This data can be used to refine transition time estimates.
+    """
+    key = (from_camera, to_camera)
+
+    # Increment count
+    _transition_counts[key] = _transition_counts.get(key, 0) + 1
+
+    # Record transition time (keep last 100 for averaging)
+    if key not in _transition_times:
+        _transition_times[key] = []
+    _transition_times[key].append(transition_seconds)
+    if len(_transition_times[key]) > 100:
+        _transition_times[key] = _transition_times[key][-100:]
+
+    logger.debug(
+        f"Recorded transition: {from_camera} -> {to_camera} "
+        f"in {transition_seconds:.1f}s (total: {_transition_counts[key]})"
+    )
+
+
+def get_transition_stats() -> dict:
+    """
+    Get statistics on observed camera transitions.
+
+    Returns dict with transition counts and average times.
+    """
+    stats = {
+        "transitions": [],
+        "total_transitions": sum(_transition_counts.values()),
+        "unique_paths": len(_transition_counts),
+    }
+
+    for (from_cam, to_cam), count in sorted(
+        _transition_counts.items(),
+        key=lambda x: x[1],
+        reverse=True
+    ):
+        times = _transition_times.get((from_cam, to_cam), [])
+        avg_time = sum(times) / len(times) if times else None
+
+        stats["transitions"].append({
+            "from": from_cam,
+            "to": to_cam,
+            "count": count,
+            "avg_seconds": round(avg_time, 1) if avg_time else None,
+            "min_configured": get_transition_time(from_cam, to_cam),
+            "is_adjacent": to_cam in get_camera_adjacency().get(from_cam, []),
+        })
+
+    return stats
+
+
+def get_adaptive_threshold(
+    camera_id: str,
+    is_cross_camera: bool,
+    current_hour: int = None,
+    occupancy: int = None
+) -> float:
+    """
+    Calculate adaptive threshold based on camera trust level, time of day, and crowd density.
+
+    Args:
+        camera_id: Current camera identifier
+        is_cross_camera: Whether this is a cross-camera match
+        current_hour: Hour of day (0-23), defaults to current time
+        occupancy: Number of active tracks, defaults to current count
+
+    Returns:
+        Adjusted threshold value (clamped between min/max)
+    """
+    if current_hour is None:
+        current_hour = datetime.now().hour
+    if occupancy is None:
+        occupancy = len(_active_tracks)
+
+    # Base threshold from camera config
+    camera_config = ADAPTIVE_THRESHOLDS["camera"].get(camera_id)
+    if camera_config:
+        base_threshold = camera_config["cross"] if is_cross_camera else camera_config["same"]
+    else:
+        # Fallback to global defaults if camera not configured
+        base_threshold = CROSS_CAMERA_THRESHOLD if is_cross_camera else SIMILARITY_THRESHOLD
+
+    adjustment = 0.0
+
+    # Time-of-day adjustment
+    time_config = ADAPTIVE_THRESHOLDS["time_of_day"]
+    if current_hour in time_config["peak_hours"]:
+        adjustment += time_config["peak_adjustment"]
+    elif current_hour in time_config["off_peak_hours"]:
+        adjustment += time_config["off_peak_adjustment"]
+
+    # Density adjustment
+    density_config = ADAPTIVE_THRESHOLDS["density"]
+    if occupancy > density_config["high_threshold"]:
+        adjustment += density_config["high_adjustment"]
+    elif occupancy < density_config["low_threshold"]:
+        adjustment += density_config["low_adjustment"]
+
+    # Apply adjustment and clamp
+    final_threshold = base_threshold + adjustment
+    final_threshold = max(ADAPTIVE_THRESHOLDS["min_threshold"], final_threshold)
+    final_threshold = min(ADAPTIVE_THRESHOLDS["max_threshold"], final_threshold)
+
+    return final_threshold
+
+
+def get_all_adaptive_thresholds(current_hour: int = None, occupancy: int = None) -> dict:
+    """
+    Get adaptive thresholds for all cameras given current conditions.
+
+    Returns dict of camera_id -> {"same": threshold, "cross": threshold}
+    """
+    if current_hour is None:
+        current_hour = datetime.now().hour
+    if occupancy is None:
+        occupancy = len(_active_tracks)
+
+    result = {}
+    for camera_id in ADAPTIVE_THRESHOLDS["camera"].keys():
+        result[camera_id] = {
+            "same": get_adaptive_threshold(camera_id, False, current_hour, occupancy),
+            "cross": get_adaptive_threshold(camera_id, True, current_hour, occupancy),
+        }
+
+    return result
+
+
+def load_negative_pairs_cache():
+    """
+    Load negative pairs from database into memory cache.
+    Called periodically to keep cache in sync with DB.
+    """
+    global _negative_pairs_cache, _negative_pairs_cache_time
+
+    db = SessionLocal()
+    try:
+        pairs = db.query(NegativePair).all()
+
+        # Build bidirectional cache
+        new_cache: Dict[int, Set[int]] = {}
+        for pair in pairs:
+            # Add both directions
+            if pair.person_id_a not in new_cache:
+                new_cache[pair.person_id_a] = set()
+            new_cache[pair.person_id_a].add(pair.person_id_b)
+
+            if pair.person_id_b not in new_cache:
+                new_cache[pair.person_id_b] = set()
+            new_cache[pair.person_id_b].add(pair.person_id_a)
+
+        _negative_pairs_cache = new_cache
+        _negative_pairs_cache_time = datetime.utcnow()
+
+        logger.info(f"Loaded {len(pairs)} negative pairs into cache ({len(new_cache)} entries)")
+
+    except Exception as e:
+        logger.error(f"Failed to load negative pairs cache: {e}")
+    finally:
+        db.close()
+
+
+def is_negative_pair(person_id_a: int, person_id_b: int) -> bool:
+    """
+    Check if two persons are marked as a negative pair (not the same person).
+    Refreshes cache if expired.
+    """
+    global _negative_pairs_cache_time
+
+    # Refresh cache if expired or not loaded
+    now = datetime.utcnow()
+    if (_negative_pairs_cache_time is None or
+        (now - _negative_pairs_cache_time).total_seconds() > NEGATIVE_PAIRS_CACHE_TTL):
+        load_negative_pairs_cache()
+
+    # Check cache
+    if person_id_a in _negative_pairs_cache:
+        return person_id_b in _negative_pairs_cache[person_id_a]
+
+    return False
 
 
 def detect_pose_from_thumbnail(thumbnail_bytes: bytes) -> Optional[str]:
@@ -211,7 +685,7 @@ def cleanup_stale_caches():
     """Clean up stale entries from all in-memory caches."""
     global _active_tracks, _last_embedding_time, _person_last_camera
     global _recent_exits, _candidate_detections, _person_color_histograms
-    global _last_cleanup_time
+    global _last_cleanup_time, _person_avg_embeddings
 
     now = datetime.utcnow()
     cleaned = 0
@@ -296,6 +770,22 @@ def cleanup_stale_caches():
         for k in stale_keys[:len(_person_color_histograms) - MAX_COLOR_HISTOGRAMS]:
             del _person_color_histograms[k]
             cleaned += 1
+
+    # Clean _person_avg_embeddings - remove expired entries
+    avg_emb_cutoff = now - timedelta(seconds=AVG_EMBEDDING_CACHE_TTL)
+    expired_avg_emb = [pid for pid, (_, cached_at) in _person_avg_embeddings.items()
+                       if cached_at < avg_emb_cutoff]
+    for pid in expired_avg_emb:
+        del _person_avg_embeddings[pid]
+        cleaned += 1
+
+    # Hard limit on _person_avg_embeddings
+    if len(_person_avg_embeddings) > MAX_CACHED_AVG_EMBEDDINGS:
+        sorted_avg = sorted(_person_avg_embeddings.items(), key=lambda x: x[1][1], reverse=True)
+        _person_avg_embeddings.clear()
+        for pid, val in sorted_avg[:MAX_CACHED_AVG_EMBEDDINGS]:
+            _person_avg_embeddings[pid] = val
+        cleaned += len(sorted_avg) - MAX_CACHED_AVG_EMBEDDINGS
 
     # Hard limit on _active_tracks
     if len(_active_tracks) > MAX_ACTIVE_TRACKS:
@@ -761,7 +1251,7 @@ class ReIDWorker:
         """Check if two cameras are adjacent in the adjacency graph."""
         if not cam1 or not cam2:
             return False
-        adjacent_to_1 = CAMERA_ADJACENCY.get(cam1, [])
+        adjacent_to_1 = get_camera_adjacency().get(cam1, [])
         return cam2 in adjacent_to_1
 
     def _compute_temporal_weight(self, last_seen: datetime) -> float:
@@ -1242,86 +1732,150 @@ class ReIDWorker:
         """
         Get embeddings for all recently active persons with AVERAGE embedding for matching.
 
+        Uses eager loading to avoid N+1 queries and caches average embeddings for performance.
+
         Returns list of (person_id, avg_embedding, embeddings, metadata) where:
-        - avg_embedding: mean of all embeddings for this person
+        - avg_embedding: mean of all embeddings for this person (cached)
         - embeddings: individual embeddings for confirmation check
         - metadata: includes camera/temporal info
         """
         cutoff = datetime.utcnow() - timedelta(hours=6)
+        now = datetime.utcnow()
 
-        persons = db.query(TrackedPerson).filter(
+        # Use eager loading to fetch persons with their embeddings in ONE query
+        persons = db.query(TrackedPerson).options(
+            joinedload(TrackedPerson.embeddings)
+        ).filter(
             TrackedPerson.last_seen >= cutoff
         ).all()
 
         result = []
+        cache_hits = 0
+        cache_misses = 0
+
         for person in persons:
-            embeddings = db.query(PersonEmbedding).filter(
-                PersonEmbedding.person_id == person.id
-            ).order_by(PersonEmbedding.created_at.desc()).limit(EMBEDDINGS_PER_PERSON).all()
+            # Get embeddings from eager-loaded relationship (no extra query!)
+            # Sort by created_at desc and limit to EMBEDDINGS_PER_PERSON
+            all_embeddings = sorted(
+                person.embeddings,
+                key=lambda e: e.created_at,
+                reverse=True
+            )[:EMBEDDINGS_PER_PERSON]
 
-            if embeddings:
-                emb_arrays = [
-                    np.frombuffer(e.embedding, dtype=np.float32)
-                    for e in embeddings
-                ]
+            if not all_embeddings:
+                continue
 
-                # Calculate AVERAGE embedding for this person
-                avg_embedding = np.mean(emb_arrays, axis=0)
-                avg_embedding = avg_embedding / (np.linalg.norm(avg_embedding) + 1e-8)
+            emb_arrays = [
+                np.frombuffer(e.embedding, dtype=np.float32)
+                for e in all_embeddings
+            ]
 
-                # Get color histogram for this person
-                color_hist = _person_color_histograms.get(person.id)
+            # Check cache for average embedding
+            cached = _person_avg_embeddings.get(person.id)
+            if cached is not None:
+                cached_avg, cached_at = cached
+                # Check if cache is still valid (not expired)
+                if (now - cached_at).total_seconds() < AVG_EMBEDDING_CACHE_TTL:
+                    avg_embedding = cached_avg
+                    cache_hits += 1
+                else:
+                    # Cache expired, recompute
+                    avg_embedding = self._compute_and_cache_avg_embedding(person.id, emb_arrays, now)
+                    cache_misses += 1
+            else:
+                # Not in cache, compute and cache
+                avg_embedding = self._compute_and_cache_avg_embedding(person.id, emb_arrays, now)
+                cache_misses += 1
 
-                # Build metadata for temporal and adjacency scoring
-                metadata = {
-                    "last_camera": person.last_camera_id,
-                    "last_seen": person.last_seen,
-                    "is_adjacent": self._cameras_adjacent(person.last_camera_id, current_camera),
-                    "is_same_camera": person.last_camera_id == current_camera,
-                    "display_id": person.display_id,
-                    "color_hist": color_hist,
-                }
+            # Get color histogram for this person
+            color_hist = _person_color_histograms.get(person.id)
 
-                result.append((person.id, avg_embedding, emb_arrays, metadata))
+            # Build metadata for temporal and adjacency scoring
+            metadata = {
+                "last_camera": person.last_camera_id,
+                "last_seen": person.last_seen,
+                "is_adjacent": self._cameras_adjacent(person.last_camera_id, current_camera),
+                "is_same_camera": person.last_camera_id == current_camera,
+                "display_id": person.display_id,
+                "color_hist": color_hist,
+            }
 
+            result.append((person.id, avg_embedding, emb_arrays, metadata))
+
+        logger.debug(f"Embedding cache: {cache_hits} hits, {cache_misses} misses, {len(result)} persons")
         return result
+
+    def _compute_and_cache_avg_embedding(
+        self, person_id: int, emb_arrays: list, now: datetime
+    ) -> np.ndarray:
+        """Compute L2-normalized average embedding and cache it."""
+        avg_embedding = np.mean(emb_arrays, axis=0)
+        avg_embedding = avg_embedding / (np.linalg.norm(avg_embedding) + 1e-8)
+
+        # Cache with timestamp
+        _person_avg_embeddings[person_id] = (avg_embedding, now)
+
+        return avg_embedding
+
+    def _invalidate_avg_embedding_cache(self, person_id: int):
+        """Invalidate cached average embedding when a new embedding is added."""
+        if person_id in _person_avg_embeddings:
+            del _person_avg_embeddings[person_id]
+            logger.debug(f"Invalidated avg embedding cache for person {person_id}")
 
     def _find_best_match_enhanced(
         self,
         embedding: np.ndarray,
         color_hist: Optional[np.ndarray],
         known_embeddings: list,
-        current_camera: str
+        current_camera: str,
+        exclude_person_id: int = None
     ) -> Optional[Tuple[int, float]]:
         """
         Enhanced matching with:
+        - Adaptive thresholds based on camera trust, time, and density
         - Average embedding comparison (not individual)
-        - Temporal exclusion (can't be two places at once)
+        - Dynamic temporal exclusion based on camera transition times
+        - Exit boost for recently exited adjacent cameras
         - Color histogram sanity check
-        - Stricter thresholds
+        - Negative pairs enforcement
+        - Transition statistics tracking
         """
         if not known_embeddings:
             return None
 
         best_match = None
         best_score = 0.0
+        best_match_last_camera = None
+        best_match_seconds = 0.0
         debug_scores = []
 
         embedding_norm = embedding / (np.linalg.norm(embedding) + 1e-8)
         now = datetime.utcnow()
+        current_hour = now.hour
+        occupancy = len(_active_tracks)
 
         for person_id, avg_embedding, emb_arrays, metadata in known_embeddings:
-            # TEMPORAL EXCLUSION: Check if this person was just seen on a different camera
-            # If so, they can't physically be here too (within TEMPORAL_EXCLUSION_SECONDS)
+            # NEGATIVE PAIR CHECK: Skip if explicitly marked as different person
+            if exclude_person_id is not None and is_negative_pair(exclude_person_id, person_id):
+                logger.debug(
+                    f"Skipping {metadata.get('display_id')}: negative pair with person {exclude_person_id}"
+                )
+                continue
+
+            # DYNAMIC TEMPORAL EXCLUSION: Check using camera-specific transition times
             last_camera = metadata.get("last_camera")
             last_seen = metadata.get("last_seen")
 
             if last_camera and last_camera != current_camera and last_seen:
-                seconds_since_last = (now - last_seen).total_seconds()
-                if seconds_since_last < TEMPORAL_EXCLUSION_SECONDS:
+                is_excluded, seconds_elapsed = check_temporal_exclusion(
+                    last_camera, current_camera, last_seen, now
+                )
+                if is_excluded:
+                    min_time = get_transition_time(last_camera, current_camera)
                     logger.debug(
                         f"Temporal exclusion: {metadata.get('display_id')} seen on {last_camera} "
-                        f"{seconds_since_last:.1f}s ago - can't be on {current_camera}"
+                        f"{seconds_elapsed:.1f}s ago (min: {min_time}s) - can't be on {current_camera}"
                     )
                     continue  # Skip this person - physically impossible
 
@@ -1347,17 +1901,23 @@ class ReIDWorker:
             # Apply temporal weight (more recent = higher weight)
             temporal_weight = self._compute_temporal_weight(last_seen)
 
-            # Apply small adjacency boost
+            # Apply adjacency boost
             adjacency_boost = ADJACENCY_BOOST if metadata.get("is_adjacent") else 0.0
 
-            # Compute final score
-            adjusted_score = similarity * temporal_weight + adjacency_boost
+            # EXIT BOOST: Bonus for matching persons who recently exited adjacent cameras
+            exit_boost = get_exit_boost(person_id, current_camera)
 
-            # Determine threshold based on camera relationship
-            if metadata.get("is_same_camera"):
-                threshold = SIMILARITY_THRESHOLD
-            else:
-                threshold = CROSS_CAMERA_THRESHOLD
+            # Compute final score with all boosts
+            adjusted_score = similarity * temporal_weight + adjacency_boost + exit_boost
+
+            # ADAPTIVE THRESHOLD: Calculate based on camera trust, time, and density
+            is_cross_camera = not metadata.get("is_same_camera", False)
+            threshold = get_adaptive_threshold(
+                camera_id=current_camera,
+                is_cross_camera=is_cross_camera,
+                current_hour=current_hour,
+                occupancy=occupancy
+            )
 
             # Count embeddings above threshold for confirmation
             embeddings_above = sum(1 for s in individual_sims if s >= threshold)
@@ -1370,16 +1930,20 @@ class ReIDWorker:
                 "display_id": metadata.get("display_id"),
                 "avg_sim": round(similarity, 3),
                 "adjusted": round(adjusted_score, 3),
-                "threshold": threshold,
+                "threshold": round(threshold, 3),
                 "above_threshold": embeddings_above,
                 "meets_confirm": meets_confirmation,
-                "is_same_cam": metadata.get("is_same_camera", False)
+                "is_same_cam": metadata.get("is_same_camera", False),
+                "exit_boost": round(exit_boost, 3) if exit_boost > 0 else None,
             })
 
             # Must exceed threshold AND meet confirmation
             if adjusted_score >= threshold and meets_confirmation and adjusted_score > best_score:
                 best_score = adjusted_score
                 best_match = (person_id, similarity)
+                best_match_last_camera = last_camera
+                if last_seen:
+                    best_match_seconds = (now - last_seen).total_seconds()
 
         # Logging
         if debug_scores:
@@ -1387,8 +1951,11 @@ class ReIDWorker:
             if best_match:
                 logger.info(
                     f"ReID match: person_id={best_match[0]}, similarity={best_match[1]:.3f}, "
-                    f"adjusted={best_score:.3f}"
+                    f"adjusted={best_score:.3f}, adaptive_threshold used"
                 )
+                # Record transition statistics for cross-camera matches
+                if best_match_last_camera and best_match_last_camera != current_camera:
+                    record_transition(best_match_last_camera, current_camera, best_match_seconds)
             else:
                 top = sorted(debug_scores, key=lambda x: x['adjusted'], reverse=True)[:3]
                 logger.info(f"ReID no match on {current_camera}. Top candidates: {top}")
@@ -1406,17 +1973,29 @@ class ReIDWorker:
         if last_time and (now - last_time).total_seconds() < 60:
             return
 
-        # Get existing embeddings to calculate average
-        existing = db.query(PersonEmbedding).filter(
-            PersonEmbedding.person_id == person_id
-        ).all()
+        # Try to use cached average first for quality gate check
+        cached = _person_avg_embeddings.get(person_id)
+        avg_embedding = None
 
-        if existing:
-            # Calculate current average
-            emb_arrays = [np.frombuffer(e.embedding, dtype=np.float32) for e in existing]
-            avg_embedding = np.mean(emb_arrays, axis=0)
-            avg_embedding = avg_embedding / (np.linalg.norm(avg_embedding) + 1e-8)
+        if cached is not None:
+            cached_avg, cached_at = cached
+            if (now - cached_at).total_seconds() < AVG_EMBEDDING_CACHE_TTL:
+                avg_embedding = cached_avg
 
+        # If no valid cache, query and compute
+        existing = None
+        if avg_embedding is None:
+            existing = db.query(PersonEmbedding).filter(
+                PersonEmbedding.person_id == person_id
+            ).all()
+
+            if existing:
+                # Calculate current average
+                emb_arrays = [np.frombuffer(e.embedding, dtype=np.float32) for e in existing]
+                avg_embedding = np.mean(emb_arrays, axis=0)
+                avg_embedding = avg_embedding / (np.linalg.norm(avg_embedding) + 1e-8)
+
+        if avg_embedding is not None:
             # Check similarity of new embedding to average
             new_norm = embedding / (np.linalg.norm(embedding) + 1e-8)
             similarity = float(np.dot(new_norm, avg_embedding))
@@ -1429,7 +2008,12 @@ class ReIDWorker:
                 )
                 return
 
-        # Check current embedding count
+        # Check current embedding count (query if not done yet)
+        if existing is None:
+            existing = db.query(PersonEmbedding).filter(
+                PersonEmbedding.person_id == person_id
+            ).all()
+
         count = len(existing) if existing else 0
 
         if count >= EMBEDDINGS_PER_PERSON:
@@ -1447,6 +2031,10 @@ class ReIDWorker:
             camera_id=camera_id
         )
         db.add(new_emb)
+
+        # Invalidate the average embedding cache since we just added a new embedding
+        self._invalidate_avg_embedding_cache(person_id)
+
         _last_embedding_time[person_id] = now
         logger.debug(f"Added quality-gated embedding for person {person_id}")
 
