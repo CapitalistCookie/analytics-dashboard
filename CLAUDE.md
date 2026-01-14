@@ -73,22 +73,31 @@ Restaurant analytics system with computer vision for people tracking across 14 c
 ### Backend Core
 | File | Purpose |
 |------|---------|
-| `backend/main.py` | FastAPI app, routes, lifespan events |
-| `backend/reid_worker.py` | MQTT worker, detection processing, person matching |
+| `backend/main.py` | FastAPI app, routes, lifespan events, WebSocket endpoint |
+| `backend/reid_worker.py` | MQTT worker, detection processing, person matching, WebSocket broadcasts |
 | `backend/reid_service.py` | OSNet model, embedding extraction |
 | `backend/models.py` | SQLAlchemy models (TrackedPerson, Staff, etc.) |
 | `backend/database.py` | DB connections (SQLite + InfluxDB) |
 | `backend/cache.py` | TTL cache with size limits |
+| `backend/websocket_manager.py` | WebSocket connection manager for real-time updates |
 
 ### Backend Routers
 | Router | API Prefix | Purpose |
 |--------|------------|---------|
 | `reid.py` | `/api/reid` | Person tracking, embeddings, merge/unmerge |
 | `staff.py` | `/api/staff` | Staff CRUD, face training |
-| `analytics.py` | `/api/analytics` | Occupancy, trends |
+| `analytics.py` | `/api/analytics` | Occupancy, trends, floor plan positions/flows |
 | `cameras.py` | `/api/cameras` | Camera info, snapshots |
 | `alerts.py` | `/api/alerts` | Alert configuration |
 | `incidents.py` | `/api/incidents` | Incident reports |
+
+### Frontend Components
+| Component | Purpose |
+|-----------|---------|
+| `FloorPlanView.tsx` | SVG floor plan with camera positions and journey paths |
+| `JourneyPath.tsx` | Animated SVG path for person journeys |
+| `useDashboardWebSocket.ts` | Hook for real-time WebSocket updates |
+| `useJourneys.ts` | Hook for MQTT-based journey tracking |
 
 ### Frontend Pages
 | Page | Route | Purpose |
@@ -150,6 +159,78 @@ MAX_COLOR_HISTOGRAMS = 100
 MAX_RECENT_EXITS = 25
 CACHE_CLEANUP_INTERVAL = 30  # seconds
 ```
+
+## WebSocket Real-Time Updates
+
+The dashboard uses WebSocket for real-time occupancy updates instead of polling.
+
+### WebSocket Endpoint
+- **URL**: `ws://host:8000/ws/dashboard`
+- **Protocol**: JSON messages with `type` and `data` fields
+
+### Message Types
+| Type | Description |
+|------|-------------|
+| `occupancy:update` | Current occupancy (total, by_camera, by_zone) |
+| `camera:status` | Camera status changes |
+| `queue:update` | Queue count updates |
+
+### How It Works
+```
+Browser ─── WebSocket ───> Backend (/ws/dashboard)
+                              │
+                              │ Broadcasts from:
+                              │ - ReID worker (on person match/create)
+                              │ - Periodic task (every 10 seconds)
+                              ▼
+                         ws_manager.broadcast()
+```
+
+### Frontend Integration
+- `useDashboardWebSocket` hook manages connection and reconnection
+- Falls back to HTTP polling if WebSocket disconnects
+- Status indicator shows "Live" (green) or "Polling" (yellow)
+
+### Testing WebSocket
+```bash
+# Check WebSocket status
+curl http://localhost:8000/api/ws/status
+
+# Browser DevTools: Network → WS tab → look for /ws/dashboard
+```
+
+## Floor Plan Visualization
+
+Interactive floor plan showing camera positions and person journeys.
+
+### Features
+- Draggable camera position editor
+- Bidirectional flow connection editor
+- Real-time journey path visualization
+- MQTT-based live updates
+
+### Data Files
+| File | Purpose |
+|------|---------|
+| `/app/data/camera_positions.json` | Camera X,Y positions on floor plan |
+| `/app/data/flow_connections.json` | Camera adjacency connections (used by ReID) |
+| `/app/data/flow_connections_backup.json` | Auto-backup before changes |
+
+### API Endpoints
+| Endpoint | Purpose |
+|----------|---------|
+| `GET/PUT /api/analytics/floorplan/positions` | Camera positions |
+| `GET/PUT /api/analytics/floorplan/flows` | Flow connections |
+| `POST /api/analytics/floorplan/flows/reset` | Reset to defaults |
+| `POST /api/analytics/floorplan/flows/restore` | Restore from backup |
+
+### ReID Integration
+Flow connections from the UI are used by the ReID ML model for:
+- **Exit boost**: Higher match confidence for adjacent cameras
+- **Temporal exclusion**: Can't be in non-adjacent places simultaneously
+- **Cross-camera tracking**: Predicts where person might appear next
+
+The ReID worker reads from `flow_connections.json` with 60-second cache TTL.
 
 ## Debug Endpoints
 

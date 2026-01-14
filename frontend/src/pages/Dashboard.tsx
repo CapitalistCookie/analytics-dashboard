@@ -10,16 +10,37 @@ import QueueStatusWidget from '../components/QueueStatusWidget'
 import { useStreamQuality, QUALITY_CONFIGS, type StreamQuality } from '../context/StreamQualityContext'
 import { useCamera } from '../context/CameraContext'
 import { useWebRTCConnectionManager } from '../context/WebRTCConnectionManager'
+import { useDashboardWebSocket } from '../hooks/useDashboardWebSocket'
 
-function OccupancyCard() {
-  const [occupancy, setOccupancy] = useState<OccupancyData | null>(null)
+// WebSocket occupancy data type
+interface WsOccupancyData {
+  total: number
+  by_camera: Record<string, number>
+  by_zone: Record<string, number>
+  timestamp: string
+}
+
+interface OccupancyCardProps {
+  wsOccupancy?: WsOccupancyData | null
+  isWsConnected?: boolean
+  needsPolling?: boolean
+}
+
+function OccupancyCard({ wsOccupancy, isWsConnected = false, needsPolling = true }: OccupancyCardProps) {
+  const [polledOccupancy, setPolledOccupancy] = useState<OccupancyData | null>(null)
   const [loading, setLoading] = useState(true)
 
+  // Only poll if WebSocket is not connected
   useEffect(() => {
+    if (!needsPolling) {
+      setLoading(false)
+      return
+    }
+
     const fetchData = async () => {
       try {
         const res = await getOccupancy()
-        setOccupancy(res.data)
+        setPolledOccupancy(res.data)
       } catch (err) {
         console.error('Failed to fetch occupancy:', err)
       } finally {
@@ -29,19 +50,37 @@ function OccupancyCard() {
     fetchData()
     const interval = setInterval(fetchData, 5000)
     return () => clearInterval(interval)
-  }, [])
+  }, [needsPolling])
 
-  if (loading) return <div className="bg-gray-800 rounded-lg p-4 md:p-6 animate-pulse h-32 md:h-40"></div>
+  // Use WebSocket data if available, otherwise use polled data
+  const totalCount = wsOccupancy?.total ?? polledOccupancy?.total_count ?? 0
+  const byCamera = wsOccupancy?.by_camera ?? polledOccupancy?.by_camera ?? {}
+  const byZone = wsOccupancy?.by_zone ?? polledOccupancy?.by_zone ?? {}
 
-  const cameraCount = Object.keys(occupancy?.by_camera || {}).length
-  const zoneCount = Object.keys(occupancy?.by_zone || {}).length
+  if (loading && !wsOccupancy) return <div className="bg-gray-800 rounded-lg p-4 md:p-6 animate-pulse h-32 md:h-40"></div>
+
+  const cameraCount = Object.keys(byCamera).length
+  const zoneCount = Object.keys(byZone).length
 
   return (
     <div className="bg-gray-800 rounded-lg p-4 md:p-6">
-      <h3 className="text-base md:text-lg font-semibold text-gray-300 mb-3 md:mb-4">Current Occupancy</h3>
+      <div className="flex items-center justify-between mb-3 md:mb-4">
+        <h3 className="text-base md:text-lg font-semibold text-gray-300">Current Occupancy</h3>
+        <span
+          className={`text-xs px-2 py-0.5 rounded-full flex items-center gap-1 ${
+            isWsConnected
+              ? 'bg-green-900/50 text-green-400'
+              : 'bg-yellow-900/50 text-yellow-400'
+          }`}
+          title={isWsConnected ? 'Real-time WebSocket updates' : 'Polling every 5 seconds'}
+        >
+          <span className={`w-1.5 h-1.5 rounded-full ${isWsConnected ? 'bg-green-400' : 'bg-yellow-400 animate-pulse'}`} />
+          {isWsConnected ? 'Live' : 'Polling'}
+        </span>
+      </div>
       <div className="grid grid-cols-3 gap-2 md:gap-4">
         <div className="text-center">
-          <p className="text-2xl md:text-4xl font-bold text-white">{occupancy?.total_count ?? 0}</p>
+          <p className="text-2xl md:text-4xl font-bold text-white">{totalCount}</p>
           <p className="text-xs md:text-sm text-gray-400">Total People</p>
         </div>
         <div className="text-center">
@@ -598,6 +637,9 @@ export default function Dashboard() {
     return (saved as 'cameras' | 'floorplan') || 'cameras'
   })
 
+  // WebSocket for real-time updates
+  const { occupancy: wsOccupancy, isConnected: isWsConnected, needsPolling } = useDashboardWebSocket()
+
   useEffect(() => {
     localStorage.setItem('dashboardJourneyPanelCollapsed', String(journeyPanelCollapsed))
   }, [journeyPanelCollapsed])
@@ -610,7 +652,11 @@ export default function Dashboard() {
     <div className="space-y-4 md:space-y-6">
       {/* Top row - stacks on mobile */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 md:gap-6">
-        <OccupancyCard />
+        <OccupancyCard
+          wsOccupancy={wsOccupancy}
+          isWsConnected={isWsConnected}
+          needsPolling={needsPolling}
+        />
         <QueueStatusWidget zone="entrance" />
         <TodayStats />
         <RecentAlerts />

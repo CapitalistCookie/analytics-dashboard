@@ -5,7 +5,7 @@ import logging
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
 import httpx
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from sqlalchemy.orm import Session
@@ -95,6 +95,45 @@ app.include_router(notes.router)
 app.include_router(activity.router)
 app.include_router(reid.router)
 app.include_router(detection_config.router)
+
+# WebSocket for real-time dashboard updates
+from websocket_manager import ws_manager
+
+
+@app.websocket("/ws/dashboard")
+async def dashboard_websocket(websocket: WebSocket):
+    """
+    WebSocket endpoint for real-time dashboard updates.
+
+    Pushes events:
+    - occupancy:update - current occupancy counts
+    - camera:status - camera status changes
+    - queue:update - queue status changes
+    """
+    await ws_manager.connect(websocket)
+    try:
+        while True:
+            # Keep connection alive, handle pings
+            data = await websocket.receive_text()
+            # Handle ping/pong for keep-alive
+            if data == "ping":
+                await websocket.send_text("pong")
+    except WebSocketDisconnect:
+        await ws_manager.disconnect(websocket)
+    except Exception as e:
+        logger.debug(f"WebSocket error: {e}")
+        await ws_manager.disconnect(websocket)
+
+
+@app.get("/api/ws/status")
+async def websocket_status():
+    """Get WebSocket connection status."""
+    return {
+        "active_connections": ws_manager.connection_count,
+        "status": "available"
+    }
+
+
 # Pydantic models for API responses
 class HealthResponse(BaseModel):
     status: str

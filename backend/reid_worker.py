@@ -815,7 +815,9 @@ class ReIDWorker:
         self.mqtt_client = None
         self._running = False
         self._cleanup_task = None
+        self._broadcast_task = None
         self._recent_event_ids: set = set()  # Track recent events to skip duplicates
+        self._last_occupancy_broadcast: int = 0  # Track last broadcast count
 
     async def start(self):
         """Start the ReID worker."""
@@ -853,6 +855,10 @@ class ReIDWorker:
                 self._cleanup_task = asyncio.create_task(self._periodic_cleanup())
                 logger.info("Started periodic cleanup task")
 
+                # Start periodic WebSocket broadcast task
+                self._broadcast_task = asyncio.create_task(self._periodic_broadcast())
+                logger.info("Started WebSocket broadcast task")
+
                 # Process messages
                 async for message in client.messages:
                     if not self._running:
@@ -868,6 +874,13 @@ class ReIDWorker:
                 self._cleanup_task.cancel()
                 try:
                     await self._cleanup_task
+                except asyncio.CancelledError:
+                    pass
+            # Cancel broadcast task
+            if self._broadcast_task:
+                self._broadcast_task.cancel()
+                try:
+                    await self._broadcast_task
                 except asyncio.CancelledError:
                     pass
             if self.http_client:
@@ -896,6 +909,56 @@ class ReIDWorker:
                 logger.error(f"[CLEANUP] Error in periodic cleanup: {e}")
 
         logger.info("[CLEANUP] Periodic cleanup task stopped")
+
+    async def _periodic_broadcast(self):
+        """Background task that broadcasts occupancy updates via WebSocket."""
+        logger.info("[BROADCAST] Periodic broadcast task started")
+        while self._running:
+            try:
+                await asyncio.sleep(10)  # Broadcast every 10 seconds
+                if self._running:
+                    await self._broadcast_occupancy()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.debug(f"[BROADCAST] Error in periodic broadcast: {e}")
+
+        logger.info("[BROADCAST] Periodic broadcast task stopped")
+
+    async def _broadcast_occupancy(self, force: bool = False):
+        """
+        Broadcast current occupancy to WebSocket clients.
+
+        Args:
+            force: If True, broadcast even if count hasn't changed
+        """
+        try:
+            from websocket_manager import ws_manager, broadcast_occupancy
+
+            # Skip if no connections
+            if ws_manager.connection_count == 0:
+                return
+
+            total = len(_active_tracks)
+
+            # Skip if count hasn't changed (unless forced)
+            if not force and total == self._last_occupancy_broadcast:
+                return
+
+            # Build per-camera counts from _person_last_camera
+            by_camera: Dict[str, int] = {}
+            for person_id, (camera_id, _) in _person_last_camera.items():
+                if person_id in _active_tracks.values():
+                    by_camera[camera_id] = by_camera.get(camera_id, 0) + 1
+
+            await broadcast_occupancy(total, by_camera)
+            self._last_occupancy_broadcast = total
+
+            logger.debug(f"[BROADCAST] Occupancy update: total={total}, by_camera={by_camera}")
+        except ImportError:
+            pass  # WebSocket manager not available
+        except Exception as e:
+            logger.debug(f"[BROADCAST] Error broadcasting occupancy: {e}")
 
     async def _process_message(self, message):
         """Process an MQTT message."""
@@ -1096,6 +1159,9 @@ class ReIDWorker:
 
                     # Publish journey update
                     await self._publish_journey_update(db, person)
+
+                    # Broadcast occupancy update via WebSocket
+                    await self._broadcast_occupancy()
             else:
                 # No match found - check if we can create a new person
                 # Only entry cameras (cam_009) can create new person IDs
@@ -1122,6 +1188,9 @@ class ReIDWorker:
 
                         # Publish initial journey update
                         await self._publish_journey_update(db, person)
+
+                        # Broadcast occupancy update via WebSocket
+                        await self._broadcast_occupancy(force=True)
                     else:
                         # Not enough frames yet - store candidate
                         logger.debug(f"Candidate {frigate_id} needs more frames for verification")
